@@ -9,6 +9,7 @@ from pydantic.alias_generators import to_camel
 
 PROTOCOL_VERSION = 1
 MAX_READ_LENGTH = 240
+MAX_CHAIN_STEPS = 6
 
 
 def _require_utc(value: datetime) -> datetime:
@@ -74,6 +75,16 @@ class EvidenceDigest(_Model):
     items: list[EvidenceItem] = Field(min_length=1, max_length=400)
 
 
+class ChainKind(StrEnum):
+    EVIDENCE = "evidence"
+    INFERENCE = "inference"
+
+
+class ChainStep(_Model):
+    kind: ChainKind
+    text: str = Field(min_length=1, max_length=MAX_READ_LENGTH)
+
+
 class Read(_Model):
     id: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=MAX_READ_LENGTH)
@@ -82,6 +93,7 @@ class Read(_Model):
     evidence_ids: list[str] = Field(max_length=12)
     hops: int = Field(ge=0, le=5)
     model_version: str = Field(min_length=1)
+    chain: list[ChainStep] | None = Field(default=None, max_length=MAX_CHAIN_STEPS)
 
 
 class Deck(_Model):

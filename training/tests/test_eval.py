@@ -19,7 +19,7 @@ def sr(confidence: float, outcome: int | None, gate: Gate = Gate.PASSED, reward:
 
 
 def deck(reads: list[ScoredRead], redundancy: float = 0.2) -> ScoredDeck:
-    return ScoredDeck(reads=tuple(reads), reward=DeckReward(read_sum=0.0, redundancy=redundancy, coverage=1.0, total=0.0))
+    return ScoredDeck(reads=tuple(reads), reward=DeckReward(read_mean=0.0, redundancy=redundancy, coverage=1.0, size_penalty=0.0, total=0.0))
 
 
 def test_ece_is_zero_for_perfectly_calibrated_bins() -> None:

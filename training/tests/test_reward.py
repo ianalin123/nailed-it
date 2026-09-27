@@ -5,10 +5,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from nailed_it_training.critic import CriticEstimate
-from nailed_it_training.protocol import Read, ReadCategory
+from nailed_it_training.protocol import ChainKind, ChainStep, Read, ReadCategory
 from nailed_it_training.reward import (
     Gate,
     RewardConfig,
+    chain_evidence_id,
     check_gates,
     deck_reward,
     expected_information_gain,
@@ -30,16 +31,26 @@ def make_read(
     confidence: float = 0.7,
     evidence_ids: tuple[str, ...] = ("e1",),
     hops: int = 2,
+    chain: list[ChainStep] | None = None,
 ) -> Read:
     return Read(
         id=read_id,
         text=text,
         category=category,
         confidence=confidence,
-        evidenceIds=list(evidence_ids),
+        evidence_ids=list(evidence_ids),
         hops=hops,
-        modelVersion="test",
+        model_version="test",
+        chain=chain,
     )
+
+
+def evidence_step(item_id: str, quote: str) -> ChainStep:
+    return ChainStep(kind=ChainKind.EVIDENCE, text=f"[{item_id}] {quote}")
+
+
+def inference_step(text: str) -> ChainStep:
+    return ChainStep(kind=ChainKind.INFERENCE, text=text)
 
 
 def verdict(label: VerdictLabel, strength: float = 0.9, cited: tuple[str, ...] = ("h1",)) -> VerifierVerdict:
@@ -103,11 +114,14 @@ class TestGates:
     def test_passes_grounded_inference(self) -> None:
         assert check_gates(make_read(), visible_ids={"e1", "e2"}) is Gate.PASSED
 
-    def test_self_reported_hops_zero_is_restatement(self) -> None:
-        assert check_gates(make_read(hops=0), visible_ids={"e1"}) is Gate.RESTATEMENT
-
-    def test_measured_entailment_is_restatement_even_if_hops_claimed(self) -> None:
+    def test_entailment_by_visible_is_restatement(self) -> None:
         assert check_gates(make_read(hops=3), visible_ids={"e1"}, entailed_by_visible=True) is Gate.RESTATEMENT
+
+    def test_lying_hops_does_not_evade_the_gate(self) -> None:
+        assert check_gates(make_read(hops=5), visible_ids={"e1"}, entailed_by_visible=True) is Gate.RESTATEMENT
+
+    def test_self_reported_hops_zero_alone_is_not_a_gate(self) -> None:
+        assert check_gates(make_read(hops=0), visible_ids={"e1"}, entailed_by_visible=False) is Gate.PASSED
 
     def test_citing_unknown_id_is_ungrounded(self) -> None:
         assert check_gates(make_read(evidence_ids=("e1", "hidden-7")), visible_ids={"e1"}) is Gate.UNGROUNDED
@@ -116,7 +130,22 @@ class TestGates:
         assert check_gates(make_read(evidence_ids=()), visible_ids={"e1"}) is Gate.UNGROUNDED
 
     def test_ungrounded_takes_precedence_over_restatement(self) -> None:
-        assert check_gates(make_read(hops=0, evidence_ids=("zz",)), visible_ids={"e1"}) is Gate.UNGROUNDED
+        assert check_gates(make_read(evidence_ids=("zz",)), visible_ids={"e1"}, entailed_by_visible=True) is Gate.UNGROUNDED
+
+    def test_chain_evidence_step_must_quote_a_visible_id(self) -> None:
+        good = make_read(chain=[evidence_step("e1", "Committed at 02:14."), inference_step("Works late.")])
+        assert check_gates(good, visible_ids={"e1"}) is Gate.PASSED
+        hidden_quote = make_read(chain=[evidence_step("h9", "Pushed at 03:10."), inference_step("Works late.")])
+        assert check_gates(hidden_quote, visible_ids={"e1"}) is Gate.UNGROUNDED
+        no_id = make_read(chain=[ChainStep(kind=ChainKind.EVIDENCE, text="Committed late."), inference_step("Works late.")])
+        assert check_gates(no_id, visible_ids={"e1"}) is Gate.UNGROUNDED
+
+    def test_chain_with_only_inference_steps_is_ungrounded(self) -> None:
+        assert check_gates(make_read(chain=[inference_step("Vibes.")]), visible_ids={"e1"}) is Gate.UNGROUNDED
+
+    def test_chain_evidence_id_parsing(self) -> None:
+        assert chain_evidence_id(evidence_step("abc-1", "x")) == "abc-1"
+        assert chain_evidence_id(ChainStep(kind=ChainKind.EVIDENCE, text="no id here")) is None
 
 
 class TestScoreRead:
@@ -142,7 +171,9 @@ class TestScoreRead:
         assert scored.reward == 0.0
 
     def test_restatement_scores_zero(self) -> None:
-        scored = score_read(make_read(hops=0), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config)
+        scored = score_read(
+            make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config, entailed_by_visible=True
+        )
         assert scored.gate is Gate.RESTATEMENT
         assert scored.reward == 0.0
 
@@ -152,6 +183,32 @@ class TestScoreRead:
         )
         assert scored.gate is Gate.UNGROUNDED
         assert scored.reward == self.config.ungrounded_penalty < 0
+
+    def test_assertion_floor_low_confidence_can_never_earn_positive_reward(self) -> None:
+        read = make_read(confidence=0.3)
+        assert information_gain(0.3, 0, 0.6, EPS) > 0
+        scored = score_read(read, visible_ids={"e1"}, verdict=verdict(VerdictLabel.CONTRADICTED), base_rate=0.6, config=self.config)
+        assert scored.reward == 0.0
+        hit = score_read(read, visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.6, config=self.config)
+        assert hit.reward == pytest.approx(information_gain(0.3, 1, 0.6, EPS))
+        assert hit.reward < 0
+
+    @given(c=st.floats(min_value=0.0, max_value=0.4999), b=unit, label=st.sampled_from([VerdictLabel.SUPPORTED, VerdictLabel.CONTRADICTED]))
+    def test_assertion_floor_holds_everywhere(self, c: float, b: float, label: VerdictLabel) -> None:
+        scored = score_read(make_read(confidence=c), visible_ids={"e1"}, verdict=verdict(label), base_rate=b, config=self.config)
+        assert scored.reward <= 0.0
+
+    def test_assertion_floor_applies_to_critic_scored_reads(self) -> None:
+        critic = CriticEstimate(p_confirm=0.05, uncertainty=0.1)
+        scored = score_read(
+            make_read(confidence=0.2),
+            visible_ids={"e1"},
+            verdict=verdict(VerdictLabel.UNVERIFIABLE),
+            base_rate=0.7,
+            critic=critic,
+            config=self.config,
+        )
+        assert scored.reward <= 0.0
 
     def test_unverifiable_without_critic_scores_zero(self) -> None:
         scored = score_read(make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.UNVERIFIABLE), base_rate=0.2, config=self.config)
@@ -171,40 +228,44 @@ class TestScoreRead:
         assert scored.reward == pytest.approx(0.75 * expected_information_gain(0.8, 0.9, 0.3, EPS))
 
 
-class TestDeckReward:
-    config = RewardConfig(eps=EPS, redundancy_weight=1.0, coverage_weight=0.5)
+def distinct_reads(n: int) -> list[Read]:
+    words = [f"w{i}a w{i}b w{i}c" for i in range(n)]
+    cats = list(ReadCategory)
+    return [make_read(str(i), f"You {words[i]}.", cats[i % len(cats)]) for i in range(n)]
 
-    def test_total_is_sum_minus_redundancy_plus_coverage(self) -> None:
-        reads = [
-            make_read("a", "You sketch on paper first.", ReadCategory.WORK_STYLE),
-            make_read("b", "You distrust frameworks.", ReadCategory.TECHNICAL_IDENTITY),
-            make_read("c", "You call your sister weekly.", ReadCategory.PEOPLE_SOCIAL),
-        ]
-        result = deck_reward(reads, [1.0, 0.5, -0.25], self.config)
-        assert result.read_sum == pytest.approx(1.25)
-        assert result.total == pytest.approx(result.read_sum - result.redundancy + 0.5 * result.coverage)
-        assert result.coverage == pytest.approx(1.0)
+
+class TestDeckReward:
+    config = RewardConfig(eps=EPS, redundancy_weight=1.0, coverage_weight=0.5, deck_size=12, size_penalty=0.25)
+
+    def test_total_is_mean_minus_redundancy_plus_coverage_at_target_size(self) -> None:
+        reads = distinct_reads(12)
+        rewards = [0.1 * i for i in range(12)]
+        result = deck_reward(reads, rewards, self.config)
+        assert result.read_mean == pytest.approx(sum(rewards) / 12)
+        assert result.size_penalty == 0.0
+        assert result.total == pytest.approx(result.read_mean - result.redundancy + 0.5 * result.coverage)
+
+    def test_reward_does_not_grow_with_deck_length(self) -> None:
+        totals = {n: deck_reward(distinct_reads(n), [0.8] * n, self.config).total for n in range(3, 31)}
+        assert max(totals, key=totals.__getitem__) == 12
+        assert totals[24] < totals[12]
+        assert totals[30] < totals[12]
+
+    def test_short_decks_are_penalised_not_rescaled(self) -> None:
+        short = deck_reward(distinct_reads(6), [0.8] * 6, self.config)
+        assert short.size_penalty == pytest.approx(0.25 * 6)
+        assert short.total < deck_reward(distinct_reads(12), [0.8] * 12, self.config).total
 
     def test_near_duplicate_reads_are_penalised_more_than_diverse_reads(self) -> None:
-        dupes = [make_read(str(i), "You write your best code after midnight.") for i in range(4)]
-        diverse = [
-            make_read("a", "You write your best code after midnight."),
-            make_read("b", "You keep a paper notebook for ideas."),
-            make_read("c", "You avoid phone calls with strangers."),
-            make_read("d", "You rewrite emails three times before sending."),
-        ]
-        rewards = [0.5] * 4
+        dupes = [make_read(str(i), "You write your best code after midnight.") for i in range(12)]
+        diverse = distinct_reads(12)
+        rewards = [0.5] * 12
         assert deck_reward(dupes, rewards, self.config).redundancy > deck_reward(diverse, rewards, self.config).redundancy
         assert deck_reward(dupes, rewards, self.config).total < deck_reward(diverse, rewards, self.config).total
 
     def test_more_categories_earn_more_coverage(self) -> None:
-        same = [make_read(str(i), f"Read number {i}.", ReadCategory.WORK_STYLE) for i in range(3)]
-        mixed = [
-            make_read("0", "Read number 0.", ReadCategory.WORK_STYLE),
-            make_read("1", "Read number 1.", ReadCategory.TASTE_AESTHETICS),
-            make_read("2", "Read number 2.", ReadCategory.LIFE_LOGISTICS),
-        ]
-        assert deck_reward(mixed, [0.0] * 3, self.config).coverage > deck_reward(same, [0.0] * 3, self.config).coverage
+        same = [make_read(str(i), f"Read number {i}.", ReadCategory.WORK_STYLE) for i in range(12)]
+        assert deck_reward(distinct_reads(12), [0.0] * 12, self.config).coverage > deck_reward(same, [0.0] * 12, self.config).coverage
 
     def test_single_read_has_zero_redundancy(self) -> None:
         assert deck_reward([make_read()], [0.3], self.config).redundancy == 0.0
@@ -214,8 +275,8 @@ class TestDeckReward:
             deck_reward([make_read()], [0.3, 0.1], self.config)
 
     def test_share_splits_total_equally(self) -> None:
-        result = deck_reward([make_read("a"), make_read("b", "Other text entirely here.")], [1.0, 1.0], self.config)
-        assert share_deck_reward(result, 2) == pytest.approx([result.total / 2] * 2)
+        result = deck_reward(distinct_reads(12), [1.0] * 12, self.config)
+        assert share_deck_reward(result, 12) == pytest.approx([result.total / 12] * 12)
 
     def test_jaccard_similarity_bounds(self) -> None:
         assert jaccard_similarity("a b c", "a b c") == 1.0

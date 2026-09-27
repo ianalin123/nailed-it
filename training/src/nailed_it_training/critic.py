@@ -15,6 +15,8 @@ from nailed_it_training.protocol import Read, ReadCategory, Truth, VerdictRecord
 from nailed_it_training.verifier import VerdictLabel, VerifierVerdict
 
 AUDIT_STOP_THRESHOLD = 0.75
+AUDIT_MIN_OVERLAP = 30
+WILSON_Z = 1.959963984540054
 
 Vector = NDArray[np.float64]
 Embedder = Callable[[str], Vector]
@@ -49,8 +51,21 @@ class CriticEstimate:
 class AuditResult:
     overlap: int
     agreement: float | None
+    upper_bound: float | None
     threshold: float
     status: AuditStatus
+
+
+def wilson_upper(p: float, n: int, z: float = WILSON_Z) -> float:
+    """Upper end of the Wilson score interval for a proportion p observed over n trials."""
+    if n < 1:
+        raise ValueError("wilson_upper needs at least one trial")
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"p must be in [0, 1], got {p}")
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return min(1.0, centre + half)
 
 
 def truth_to_target(truth: Truth) -> float:
@@ -154,9 +169,12 @@ def audit_verifier(
     verifier_verdicts: Mapping[ReadKey, VerifierVerdict],
     *,
     threshold: float = AUDIT_STOP_THRESHOLD,
-    min_overlap: int = 20,
+    min_overlap: int = AUDIT_MIN_OVERLAP,
 ) -> AuditResult:
-    """Agreement = mean(1 - |verifier - human|) over reads both judged; partly counts as half credit either way."""
+    """Agreement = mean(1 - |verifier - human|) over reads both judged; partly counts as half credit either way.
+
+    Stop only when the Wilson 95% upper bound is below the threshold and the overlap has at least min_overlap reads.
+    """
     scores: list[float] = []
     for record in records:
         verdict = verifier_verdicts.get((record.digest_id, record.read.id))
@@ -166,9 +184,11 @@ def audit_verifier(
         if value is None:
             continue
         scores.append(1.0 - abs(value - truth_to_target(record.truth)))
-    if len(scores) < min_overlap:
-        agreement = sum(scores) / len(scores) if scores else None
-        return AuditResult(len(scores), agreement, threshold, AuditStatus.INSUFFICIENT_DATA)
+    if not scores:
+        return AuditResult(0, None, None, threshold, AuditStatus.INSUFFICIENT_DATA)
     agreement = sum(scores) / len(scores)
-    status = AuditStatus.OK if agreement >= threshold else AuditStatus.STOP
-    return AuditResult(len(scores), agreement, threshold, status)
+    upper = wilson_upper(agreement, len(scores))
+    if len(scores) < min_overlap:
+        return AuditResult(len(scores), agreement, upper, threshold, AuditStatus.INSUFFICIENT_DATA)
+    status = AuditStatus.STOP if upper < threshold else AuditStatus.OK
+    return AuditResult(len(scores), agreement, upper, threshold, status)

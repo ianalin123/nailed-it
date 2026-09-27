@@ -18,20 +18,10 @@ sampled a real model.
 ```fish
 uv sync                                  # numpy + pydantic, plus pytest/hypothesis for dev
 uv run pytest                            # full suite
-uv run nailed-it-train demo --seed 1     # stages A + B + ablation on synthetic data
+uv run nailed-it-train demo --seed 1     # stages A + B + ablation on synthetic data (wiring check)
 uv run nailed-it-train demo --seed 1 --with-verdicts   # also audits the verifier and trains the critic
 ```
 
-With `--with-verdicts`, the synthetic human labels carry 10% flips and 10% `partly`. At `--seed 0`
-the audit comes out at 0.713 < 0.75, so training halts with exit code 2. That is the stop rule
-working as designed, not a bug. See the caveats below.
-
-River (not runnable yet, since no key has been issued):
-
-```fish
-uv sync --extra river                    # river-client, transformers, openai
-set -x RIVER_API_KEY rv_...              # environment only; never written to a file
-```
 
 ## Layout
 
@@ -40,39 +30,52 @@ set -x RIVER_API_KEY rv_...              # environment only; never written to a 
 | `protocol.py` | protocol package | Pydantic mirror of `EvidenceItem`, `EvidenceDigest`, `Read`, `Deck`, `VerdictRecord` |
 | `episodes.py` | Idea 1 | Temporal and leave-one-source-out splits, seeded |
 | `verifier.py` | Idea 1 | `Verifier` protocol, `LlmVerifier` (injectable client, citation check), `KeywordVerifier` fake |
-| `base_rate.py` | Idea 2 | Hit rate on other people, shrunk toward 0.5 |
+| `base_rate.py` | Idea 2, amendment 1 | `BaseRateJudge` with category shrinkage (default); population hit rate (alternative) |
 | `reward.py` | Ideas 2 to 4 | `information_gain`, gates, `score_read`, `deck_reward` |
-| `critic.py` | Idea 5 | Logistic-regression critic on verdict JSONL, verifier audit, 0.75 stop |
+| `critic.py` | Idea 5, amendment 6 | Logistic-regression critic on verdict JSONL, Wilson-bound verifier audit |
 | `selection.py` | Idea 6 | Thompson sampling over categories, priority by critic uncertainty and undecided verifier |
 | `eval.py` | Eval | Benchmark metrics and the ablation table |
-| `river_adapter.py` | Stages | `TrainerBackend` protocol and `RiverBackend` |
+| `river_adapter.py` | Stages | `TrainerBackend` protocol, `RiverBackend`, `RiverLlmClient` |
+| `ledger.py` | | Pricing table, spend ledger, hard cap |
+| `smoke.py` | | First real River calls |
 | `fake_backend.py` | | In-process backend for tests and the demo |
 | `reader.py` | | Reader prompt and deck parsing |
 | `pipeline.py`, `cli.py` | Stages A, B, Eval | Frozen benchmark, stage A filter, RL rows, ablation |
 | `synthetic/` | | Invented personas, trait lexicon, synthetic verdicts |
 
-## Decisions the spec left open
+## Reward design (spec + 2026-09-27 amendments)
 
-- **Clipping.** eps defaults to 0.01, so a maximally confident miss scores log(0.01) - log(0.5), about -3.9 nats, against a b=0.5 base rate.
-- **Restatement gate.** A read is gated if its self-reported `hops == 0` *or* a single visible item entails it. Entailment is checked by running the verifier on the visible set: supported, one citation, strength at or above the threshold. Self-reported hops alone can be gamed because the policy writes that field.
-- **Grounding gate.** Empty `evidenceIds` counts as ungrounded. Ungrounded reads get a fixed penalty (-1.0), not 0. With 0, citing a fake id would be a free way to dodge a likely confident miss.
-- **Weak verdicts.** Verdicts below `min_verdict_strength` (0.5) are treated as unverifiable.
-- **Unverifiable reads.** Reward is `(1 - u) * E_{y~critic}[R]`, where `u` is the critic's binary entropy in bits. Without a critic the reward is 0.
-- **Deck reward.** `sum(read rewards) - 1.0 * mean pairwise Jaccard + 0.5 * (distinct categories / min(n_reads, 9))`. Weights are configurable. In RL the whole deck is one trajectory, so every token gets the same advantage. That is "shared across reads".
-- **Base rate.** Hits over *decided* verdicts only (unverifiable is not a sample), with a Beta prior: `(hits + 2 * 0.5) / (decided + 2)`. The population is the training people's training digests, never benchmark people.
-- **Undated items.** Excluded from temporal episodes by default. An optional `HIDDEN` policy uses them for verification only. They are never visible, because an undated item may postdate the cutoff.
-- **Stage A.** A deck enters the verified SFT set only if at least 3 reads survive, which matches `Deck` min 3.
-- **Critic target.** `nailed` = 1, `partly` = 0.5, `off` = 0, trained as soft-label logistic regression over a hashed bag of words, category, confidence, and hops.
-- **Audit.** Agreement is `mean(1 - |verifier - human|)` over reads that have both a human verdict and a decided verifier verdict, so `partly` earns half credit. Agreement >= 0.75 is OK. Below that, training stops. Fewer than `min_overlap` (20) reads returns `insufficient_data`, which halts only when `require_audit` is set.
-- **Bandit.** The bandit reward is critic surprise `|label - P(confirm)|`, used as a fractional Beta update per category. The card priority is critic entropy, plus 0.5 if the verifier could not decide. Only cards with confidence in [0.45, 0.8] are eligible.
-- **Metrics.** Mean information gain divides by *all* reads, so gated and unverifiable reads count as zero. Accuracy and ECE use decided reads. The unverifiable rate uses reads that passed the gates. An extra ungrounded-rate column and a malformed-output count are included.
-- **Benchmark.** It covers everything from the held-out people, plus the latest 20% of each training person's dated items. That window is removed from training. The benchmark is fingerprinted and re-checked before each eval, and the pipeline raises if any benchmark hidden item appears in a training episode.
+- **Information gain.** `R = log score(c) - log score(b)`, clipped at eps = 0.01. A maximally confident miss scores about -3.9 nats against b = 0.5.
+- **Assertion floor (amendment 2).** When confidence < 0.5, `R = min(R, 0)`. This applies to verified reads and to critic-scored reads.
+- **Base rate (amendment 1).** The default source is `CategoryShrunkBaseRate(CachingJudge(LlmBaseRateJudge(...)))`. The judge sees no evidence and estimates P(true) for a random person in the population. That estimate is shrunk toward the running mean of the read's category, as `(4 * judged + 1 * category mean) / 5`. The first read in a category is not shrunk. The running mean depends on scoring order. `PopulationBaseRate` (hit rate on other people, shrunk toward 0.5) remains as an alternative for when a real population exists.
+- **Restatement (amendment 3).** This is entailment only. The verifier runs on the visible items, and a read counts as a restatement if it is supported with a single citation at strength >= 0.5. Self-reported `hops` is ignored.
+- **Grounding (amendment 4, plus chains).** A read is ungrounded (-1) if `evidenceIds` is empty or names a non-visible id, or if any chain evidence step fails to start with `[<visible id>]`, or if the chain has no evidence step. The TypeScript `ChainStep` has no id field, so the id travels inside the step's `text`. Recommendation: add `evidenceId?: string` to `ChainStep`.
+- **Deck (amendment 5).** `mean(read rewards) - 1.0 * mean pairwise Jaccard + 0.5 * coverage - 0.25 * |n - 12|`. Wrong-size decks are penalised, not rescaled.
+- **Audit (amendment 6).** Training stops only when the overlap has at least 30 reads and the Wilson 95% upper bound on agreement is below 0.75. Agreement is `mean(1 - |verifier - human|)`, so `partly` earns half credit.
+- **Cost control.** `CachingVerifier` keys on (read text hash, evidence-set hash). `CachingJudge` keys on the read text hash. `LlmVerifier` batches up to `batch_size` claims per call. Call and hit counts are available on `.stats`.
+- **Spend ledger.** `SpendLedger` checks every River call's worst-case cost before the call, records the real token counts after, and persists to `.spend/ledger.jsonl` (gitignored), so the cap holds across processes. River reports `prompt_tokens=0` from `Client.sample`, so prompt tokens are counted locally with River's own renderer tokenizer.
+- **Unverifiable reads.** Reward is `(1 - u) * E_critic[R]` with the assertion floor applied, or 0 without a critic.
+- **Episodes.** Undated items are excluded from temporal splits by default. There is no visible-leak option.
+- **Stage A.** A deck enters the verified SFT set only if at least 3 reads survive. Starvation raises `StageAStarvedError`.
+
+## Training data
+
+`pipeline.run_pipeline` takes owner-approved `EvidenceDigest`s and never imports `synthetic/`; a test enforces this. With one person, the benchmark is that person's latest 20% time window. The `demo` subcommand and the tests still use invented personas, and the demo is a wiring check only.
+
+## River
+
+```fish
+uv sync --extra river
+set -a; . ./.env.local; set +a            # RIVER_API_KEY, process environment only
+set -x HF_HUB_DISABLE_XET 1               # the Xet download client does not go through the sandbox proxy
+uv run nailed-it-train smoke a|b|c        # reader sample, verifier + judge, minimal RL; $5 cap across all three
+```
 
 ## Caveats
 
 - Undated items from training people stay in training, even though some may postdate the benchmark window.
-- The audit threshold has no confidence interval. On about 50 overlapping reads, a perfect verifier facing 10% flipped and 10% `partly` human labels falls below 0.75 about 2% of the time.
-- `RiverBackend` has never been run. It was checked only against the docs and the installed `river-client` 0.12.0 signatures. The notes are in `docs/working/river-notes.md`, which is gitignored and local.
+- `RiverBackend.deploy` and endpoint sampling are not exercised, and endpoint sampling is refused because it cannot be metered.
+- The notes are in `docs/working/river-notes.md`, which is gitignored and local.
 
 ## Data
 

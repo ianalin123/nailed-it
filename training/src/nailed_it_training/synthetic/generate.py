@@ -1,10 +1,11 @@
 """Generate invented persona digests with known ground truth."""
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from nailed_it_training.protocol import EvidenceDigest, EvidenceItem, GuessCounts, Read, SourceKind, Truth, VerdictRecord
+from nailed_it_training.protocol import EvidenceDigest, EvidenceItem, GuessCounts, Read, ReadCategory, SourceKind, Truth, VerdictRecord
 from nailed_it_training.synthetic.lexicon import DETAILS, FILLER, FIRST_NAMES, LAST_NAMES, LEXICON, Trait
 from nailed_it_training.verifier import TraitRule
 
@@ -126,3 +127,14 @@ def synthetic_verdicts(
                 )
             )
     return records
+
+
+UNKNOWN_CLAIM_BASE_RATE = 0.3
+
+
+class LexiconJudge:
+    """Test double for BaseRateJudge: the prevalence the lexicon was generated with. Claims outside the lexicon get 0.3."""
+
+    def judge_many(self, reads: Sequence[tuple[str, ReadCategory]]) -> list[float]:
+        prevalence = {t.read_text: (t.p_without_signal * 2.5 if t.signal else t.prevalence.value) for t in LEXICON}
+        return [prevalence.get(text, UNKNOWN_CLAIM_BASE_RATE) for text, _ in reads]

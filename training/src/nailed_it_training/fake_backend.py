@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from nailed_it_training.ledger import SpendLedger, Usage, estimate_tokens
 from nailed_it_training.protocol import ReadCategory
 from nailed_it_training.river_adapter import (
     CheckpointRef,
@@ -35,7 +36,7 @@ from nailed_it_training.synthetic.lexicon import LEXICON, Prevalence, Trait
 
 FAKE_BASE = "fake/base"
 FAKE_TEACHER = "fake/teacher"
-DECK_SIZE = 6
+DECK_SIZE = 12
 SFT_PRIOR_STRENGTH = 5.0
 _EVIDENCE_MARKER = "Evidence items (JSON):\n"
 
@@ -97,8 +98,21 @@ def _supporting(evidence: list[dict[str, str]], trait: Trait) -> list[str]:
     return [e["id"] for e in evidence if any(p in e["text"].lower() for p in trait.support_phrases)]
 
 
-def _read(read_id: str, text: str, category: ReadCategory, confidence: float, ids: list[str], hops: int) -> dict[str, object]:
-    return {"id": read_id, "text": text[:240], "category": category.value, "confidence": confidence, "evidenceIds": ids, "hops": hops}
+def _read(
+    read_id: str, text: str, category: ReadCategory, confidence: float, ids: list[str], hops: int, evidence: list[dict[str, str]]
+) -> dict[str, object]:
+    quotes = {e["id"]: e["text"] for e in evidence}
+    chain = [{"kind": "evidence", "text": f"[{i}] {quotes.get(i, 'unseen')}"[:240]} for i in ids]
+    chain.append({"kind": "inference", "text": "So the read follows."})
+    return {
+        "id": read_id,
+        "text": text[:240],
+        "category": category.value,
+        "confidence": confidence,
+        "evidenceIds": ids,
+        "hops": hops,
+        "chain": chain,
+    }
 
 
 def _write_read(strategy: Strategy, index: int, evidence: list[dict[str, str]], rng: random.Random) -> dict[str, object]:
@@ -110,21 +124,21 @@ def _write_read(strategy: Strategy, index: int, evidence: list[dict[str, str]], 
 
     if strategy is Strategy.GENERIC:
         trait = rng.choice([t for t in LEXICON if t.prevalence is Prevalence.UNIVERSAL])
-        return _read(read_id, trait.read_text, trait.category, 0.9, any_id, 2)
+        return _read(read_id, trait.read_text, trait.category, 0.9, any_id, 2, evidence)
     if strategy is Strategy.RESTATE and evidence:
         item = rng.choice(evidence)
-        return _read(read_id, item["text"], ReadCategory.WORK_STYLE, 0.95, [item["id"]], 0)
+        return _read(read_id, item["text"], ReadCategory.WORK_STYLE, 0.95, [item["id"]], 0, evidence)
     if strategy is Strategy.INFER and evidenced:
         trait, ids = rng.choice(evidenced)
-        return _read(read_id, trait.read_text, trait.category, 0.75, [rng.choice(ids)], 1)
+        return _read(read_id, trait.read_text, trait.category, 0.75, [rng.choice(ids)], 1, evidence)
     if strategy is Strategy.BOLD and consequences:
         trait, ids = rng.choice(consequences)
-        return _read(read_id, trait.read_text, trait.category, 0.65, [rng.choice(ids)], 2)
+        return _read(read_id, trait.read_text, trait.category, 0.65, [rng.choice(ids)], 2, evidence)
     if strategy is Strategy.FABRICATE:
         trait = rng.choice(guessable)
-        return _read(read_id, trait.read_text, trait.category, 0.8, ["fabricated-evidence-id"], 2)
+        return _read(read_id, trait.read_text, trait.category, 0.8, ["fabricated-evidence-id"], 2, evidence)
     trait = rng.choice(guessable)
-    return _read(read_id, trait.read_text, trait.category, 0.85, any_id, 2)
+    return _read(read_id, trait.read_text, trait.category, 0.85, any_id, 2, evidence)
 
 
 def _strategies_in(completion: str) -> list[Strategy]:
@@ -141,12 +155,27 @@ def _strategies_in(completion: str) -> list[Strategy]:
 
 
 class FakeBackend:
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, ledger: SpendLedger | None = None) -> None:
         self._seed = seed
+        self._ledger = ledger
+        self._endpoint_base: dict[str, str] = {}
         self._policies: dict[str, Logits] = {base: _logits(p) for base, p in _INITIAL_PROBS.items()}
         self._datasets: dict[str, list[SftExample]] = {}
         self._endpoints: dict[str, str] = {}
         self.reward_history: dict[str, list[float]] = {}
+
+    def _base_of(self, target: SampleTarget) -> str:
+        if isinstance(target, Endpoint):
+            return self._endpoint_base[target.base_url]
+        return target.checkpoint.base_model if target.checkpoint else target.base_model
+
+    def _check(self, model: str, label: str, prompt: int, completion: int, training: int = 0) -> None:
+        if self._ledger is not None:
+            self._ledger.check(Usage(model, label, prompt_tokens=prompt, completion_tokens=completion, training_tokens=training))
+
+    def _record(self, model: str, label: str, prompt: int, completion: int, training: int = 0) -> None:
+        if self._ledger is not None:
+            self._ledger.record(Usage(model, label, prompt_tokens=prompt, completion_tokens=completion, training_tokens=training))
 
     def _policy_key(self, target: SampleTarget) -> str:
         if isinstance(target, Endpoint):
@@ -183,6 +212,10 @@ class FakeBackend:
         require_nonempty(config.name, rows)
         start_key = config.init_checkpoint.training_path if config.init_checkpoint else config.base_model
         logits = self._policies[start_key].copy()
+        rollouts = config.steps * config.groups_per_step * config.group_size
+        worst_prompt = rollouts * max(estimate_tokens(r.system + r.user) for r in rows)
+        worst_completion = rollouts * config.max_generated_tokens
+        self._check(config.base_model, f"rl:{config.name}", worst_prompt, worst_completion, worst_prompt + worst_completion)
         history: list[float] = []
         for step in range(config.steps):
             grad = np.zeros_like(logits)
@@ -194,6 +227,8 @@ class FakeBackend:
                 for j in range(config.group_size):
                     rng = random.Random(_stable_seed(self._seed, config.seed, config.name, step, row.row_id, j))
                     text, strategies = self._generate(logits, row.user, config.temperature, rng)
+                    prompt_tokens, completion_tokens = estimate_tokens(row.system + row.user), estimate_tokens(text)
+                    self._record(config.base_model, f"rl:{config.name}", prompt_tokens, completion_tokens, prompt_tokens + completion_tokens)
                     samples.append((reward_fn(row, text), strategies))
                 rewards = [r for r, _ in samples]
                 if not all(math.isfinite(r) for r in rewards):
@@ -218,17 +253,20 @@ class FakeBackend:
     def deploy(self, checkpoint: CheckpointRef) -> Endpoint:
         url = f"fake://deploy/{checkpoint.training_path.removeprefix('fake://')}"
         self._endpoints[url] = checkpoint.training_path
+        self._endpoint_base[url] = checkpoint.base_model
         return Endpoint(base_url=url, model=checkpoint.training_path)
 
     def sample(
         self, target: SampleTarget, *, system: str, user: str, n: int, max_tokens: int, temperature: float, seed: int
     ) -> list[str]:
         key = self._policy_key(target)
+        model = self._base_of(target)
+        prompt_tokens = estimate_tokens(system + user)
+        self._check(model, "sample", prompt_tokens * n, max_tokens * n)
         logits = self._policies[key]
-        return [
-            self._generate(logits, user, temperature, random.Random(_stable_seed(self._seed, seed, key, user, i)))[0]
-            for i in range(n)
-        ]
+        texts = [self._generate(logits, user, temperature, random.Random(_stable_seed(self._seed, seed, key, user, i)))[0] for i in range(n)]
+        self._record(model, "sample", prompt_tokens * n, sum(estimate_tokens(t) for t in texts))
+        return texts
 
     def strategy_probs(self, target: ModelRef) -> dict[Strategy, float]:
         probs = _softmax(self._policies[self._policy_key(target)])

@@ -1,8 +1,10 @@
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from nailed_it_training.base_rate import CategoryShrunkBaseRate
 from nailed_it_training.cli import main
 from nailed_it_training.episodes import SplitConfig, build_episodes
 from nailed_it_training.eval import ABLATION_ROWS, AblationRow
@@ -11,6 +13,7 @@ from nailed_it_training.pipeline import (
     BenchmarkLeakageError,
     BenchmarkTamperedError,
     PipelineConfig,
+    StageAStarvedError,
     VerifierDistrustedError,
     assert_no_leakage,
     freeze_benchmark,
@@ -19,14 +22,24 @@ from nailed_it_training.pipeline import (
     verify_frozen,
 )
 from nailed_it_training.reward import Gate
-from nailed_it_training.synthetic import generate_personas, keyword_rules, synthetic_verdicts
-from nailed_it_training.verifier import KeywordVerifier
+from nailed_it_training.synthetic import LexiconJudge, generate_personas, keyword_rules, synthetic_verdicts
+from nailed_it_training.verifier import CachingVerifier, KeywordVerifier
 
-SMALL = PipelineConfig(seed=0, n_train_personas=8, n_eval_personas=2, rl_steps=6, sft_steps=5, group_size=4, groups_per_step=4)
+PEOPLE = generate_personas(10, seed=0)
+DIGESTS = [p.digest for p in PEOPLE]
+HELD_OUT = frozenset(d.digest_id for d in DIGESTS[8:])
+SMALL = PipelineConfig(seed=0, heldout_digest_ids=HELD_OUT, rl_steps=6, sft_steps=5, group_size=4, groups_per_step=4)
 
 
-def run(config: PipelineConfig = SMALL, verdicts=None):
-    return run_pipeline(FakeBackend(seed=config.seed), KeywordVerifier(keyword_rules()), config, verdicts=verdicts)
+def run(config: PipelineConfig = SMALL, verdicts=None, digests=DIGESTS, verifier=None):
+    return run_pipeline(
+        FakeBackend(seed=config.seed),
+        verifier or KeywordVerifier(keyword_rules()),
+        CategoryShrunkBaseRate(LexiconJudge()),
+        digests,
+        config,
+        verdicts=verdicts,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -62,15 +75,13 @@ def test_benchmark_people_never_enter_training(result) -> None:
 
 
 def test_audit_stop_halts_training() -> None:
-    personas = generate_personas(SMALL.n_train_personas, seed=SMALL.seed)
-    bad = synthetic_verdicts(personas, reads_per_person=6, seed=1, flip_rate=0.9, partly_rate=0.0)
+    bad = synthetic_verdicts(PEOPLE[:8], reads_per_person=12, seed=1, flip_rate=0.9, partly_rate=0.0)
     with pytest.raises(VerifierDistrustedError):
         run(verdicts=bad)
 
 
 def test_audit_ok_trains_with_critic() -> None:
-    personas = generate_personas(SMALL.n_train_personas, seed=SMALL.seed)
-    good = synthetic_verdicts(personas, reads_per_person=6, seed=1, flip_rate=0.0, partly_rate=0.05)
+    good = synthetic_verdicts(PEOPLE[:8], reads_per_person=6, seed=1, flip_rate=0.0, partly_rate=0.05)
     out = run(verdicts=good)
     assert out.audit is not None and out.audit.agreement is not None and out.audit.agreement >= 0.75
     assert out.critic_trained
@@ -105,8 +116,34 @@ class TestBenchmark:
             assert_no_leakage(freeze_benchmark(episodes[:1]), episodes)
 
 
+def test_single_person_run_uses_only_a_held_out_time_window() -> None:
+    config = PipelineConfig(seed=0, rl_steps=2, sft_steps=2, group_size=2, groups_per_step=2, teacher_decks_per_episode=8, min_survivors=1)
+    out = run(config, digests=DIGESTS[:1])
+    assert out.benchmark_digest_ids == frozenset()
+    assert out.training_digest_ids == {DIGESTS[0].digest_id}
+    assert set(out.metrics) == set(ABLATION_ROWS)
+
+
+def test_verifier_calls_are_cached_across_stages() -> None:
+    cached = CachingVerifier(KeywordVerifier(keyword_rules()))
+    run(verifier=cached)
+    assert cached.stats.hits > 0
+
+
+def test_pipeline_module_does_not_import_synthetic_data() -> None:
+    import nailed_it_training.pipeline as pipeline
+
+    assert "synthetic" not in Path(pipeline.__file__).read_text()
+
+
+def test_stage_a_starvation_is_a_named_error() -> None:
+    config = PipelineConfig(seed=0, rl_steps=1, sft_steps=1, group_size=2, groups_per_step=1, teacher_decks_per_episode=1, min_survivors=12)
+    with pytest.raises(StageAStarvedError):
+        run(config, digests=DIGESTS[:1])
+
+
 def test_cli_demo_prints_table(capsys: pytest.CaptureFixture[str]) -> None:
-    code = main(["demo", "--seed", "0", "--train-personas", "6", "--eval-personas", "2", "--rl-steps", "3", "--sft-steps", "3"])
+    code = main(["demo", "--seed", "0", "--people", "6", "--rl-steps", "3", "--sft-steps", "3"])
     out = capsys.readouterr().out
     assert code == 0
     assert "Full (A + B)" in out

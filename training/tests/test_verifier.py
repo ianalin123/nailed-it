@@ -5,6 +5,7 @@ import pytest
 
 from nailed_it_training.protocol import EvidenceItem, SourceKind
 from nailed_it_training.verifier import (
+    CachingVerifier,
     KeywordVerifier,
     LlmVerifier,
     TraitRule,
@@ -13,6 +14,7 @@ from nailed_it_training.verifier import (
     VerifierResponseError,
     build_verifier_prompt,
     detect_restatement,
+    evidence_set_hash,
 )
 
 HIDDEN = [
@@ -31,8 +33,12 @@ class ScriptedClient:
         return self.reply
 
 
+def verdict_json(claim: str, label: str, cited: list[str], strength: float = 0.8) -> dict:
+    return {"claim": claim, "label": label, "strength": strength, "citedIds": cited, "rationale": "because"}
+
+
 def reply(label: str, cited: list[str], strength: float = 0.8) -> str:
-    return json.dumps({"label": label, "strength": strength, "citedIds": cited, "rationale": "because"})
+    return json.dumps({"verdicts": [verdict_json("c0", label, cited, strength)]})
 
 
 class TestLlmVerifier:
@@ -63,7 +69,13 @@ class TestLlmVerifier:
 
     @pytest.mark.parametrize(
         "raw",
-        ["not json", json.dumps({"label": "maybe", "strength": 0.5, "citedIds": [], "rationale": ""}), json.dumps({"label": "supported"})],
+        [
+            "not json",
+            json.dumps({"verdicts": [{"claim": "c0", "label": "maybe", "strength": 0.5, "citedIds": [], "rationale": ""}]}),
+            json.dumps({"verdicts": [{"claim": "c0", "label": "supported"}]}),
+            json.dumps({"verdicts": []}),
+            json.dumps({"label": "supported", "strength": 0.5, "citedIds": ["h1"], "rationale": ""}),
+        ],
     )
     def test_malformed_response_raises(self, raw: str) -> None:
         with pytest.raises(VerifierResponseError):
@@ -74,9 +86,9 @@ class TestLlmVerifier:
             LlmVerifier(ScriptedClient(reply("unverifiable", []))).verify("x", [])
 
     def test_prompt_lists_every_hidden_id_and_demands_citations(self) -> None:
-        system, user = build_verifier_prompt("You work late at night.", HIDDEN)
+        system, user = build_verifier_prompt(["You work late at night.", "You skip standups."], HIDDEN)
         assert "h1" in user and "h2" in user
-        assert "You work late at night." in user
+        assert "You work late at night." in user and "c1" in user
         assert "citedIds" in system
         assert "only" in system.lower()
         assert "not instructions" in system.lower()
@@ -115,3 +127,77 @@ def test_detect_restatement_requires_single_strong_citation() -> None:
     two = visible + [EvidenceItem(id="v2", source=SourceKind.GIT_HISTORY, text="Pushed a fix at 03:15.")]
     assert not detect_restatement("You work after midnight.", two, KeywordVerifier(RULES), min_strength=0.5)
     assert not detect_restatement("You collect stamps.", visible, KeywordVerifier(RULES), min_strength=0.5)
+
+
+class TestBatching:
+    def test_one_call_judges_several_claims(self) -> None:
+        client = ScriptedClient(
+            json.dumps({"verdicts": [verdict_json("c1", "contradicted", ["h2"]), verdict_json("c0", "supported", ["h1"])]})
+        )
+        verifier = LlmVerifier(client, batch_size=8)
+        verdicts = verifier.verify_many(["You work late.", "You love 8am meetings."], HIDDEN)
+        assert [v.label for v in verdicts] == [VerdictLabel.SUPPORTED, VerdictLabel.CONTRADICTED]
+        assert len(client.calls) == 1
+        assert verifier.stats.calls == 1 and verifier.stats.items == 2
+
+    def test_missing_or_duplicate_claims_raise(self) -> None:
+        missing = ScriptedClient(json.dumps({"verdicts": [verdict_json("c0", "supported", ["h1"])]}))
+        with pytest.raises(VerifierResponseError, match="c1"):
+            LlmVerifier(missing).verify_many(["a", "b"], HIDDEN)
+        dup = ScriptedClient(json.dumps({"verdicts": [verdict_json("c0", "supported", ["h1"])] * 2}))
+        with pytest.raises(VerifierResponseError):
+            LlmVerifier(dup).verify_many(["a"], HIDDEN)
+
+    def test_batches_are_split_by_batch_size(self) -> None:
+        class Echo:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete(self, system: str, user: str) -> str:
+                self.calls += 1
+                n = user.count('"claim": "c')
+                return json.dumps({"verdicts": [verdict_json(f"c{i}", "unverifiable", [], 0.0) for i in range(n)]})
+
+        client = Echo()
+        assert len(LlmVerifier(client, batch_size=2).verify_many(["a", "b", "c", "d", "e"], HIDDEN)) == 5
+        assert client.calls == 3
+
+
+class TestCaching:
+    def test_repeated_judgements_hit_the_cache(self) -> None:
+        inner = KeywordVerifier(RULES)
+        cached = CachingVerifier(inner)
+        first = cached.verify_many(["after midnight", "collect stamps"], HIDDEN)
+        second = cached.verify_many(["collect stamps", "after midnight"], HIDDEN)
+        assert first == second[::-1]
+        assert cached.stats.misses == 2 and cached.stats.hits == 2
+
+    def test_different_evidence_set_is_a_different_key(self) -> None:
+        cached = CachingVerifier(KeywordVerifier(RULES))
+        cached.verify("after midnight", HIDDEN)
+        cached.verify("after midnight", HIDDEN[:1])
+        assert cached.stats.misses == 2
+
+    def test_evidence_set_hash_ignores_order(self) -> None:
+        assert evidence_set_hash(HIDDEN) == evidence_set_hash(list(reversed(HIDDEN)))
+
+
+class TestRejectionMode:
+    def test_training_mode_turns_an_ungrounded_verdict_into_a_counted_rejection(self) -> None:
+        client = ScriptedClient(json.dumps({"verdicts": [verdict_json("c0", "supported", ["e5"]), verdict_json("c1", "supported", ["h1"])]}))
+        verifier = LlmVerifier(client, on_ungrounded="reject")
+        first, second = verifier.verify_many(["a", "b"], HIDDEN)
+        assert first.label is VerdictLabel.UNVERIFIABLE
+        assert first.cited_ids == []
+        assert "rejected" in first.rationale and "e5" in first.rationale
+        assert second.label is VerdictLabel.SUPPORTED
+        assert verifier.stats.rejected == 1
+
+    def test_default_mode_still_raises(self) -> None:
+        client = ScriptedClient(json.dumps({"verdicts": [verdict_json("c0", "supported", ["e5"])]}))
+        with pytest.raises(UngroundedVerdictError):
+            LlmVerifier(client).verify_many(["a"], HIDDEN)
+
+    def test_unknown_mode_is_an_error(self) -> None:
+        with pytest.raises(ValueError):
+            LlmVerifier(ScriptedClient("{}"), on_ungrounded="ignore")  # type: ignore[arg-type]

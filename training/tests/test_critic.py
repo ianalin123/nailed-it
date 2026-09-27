@@ -14,9 +14,11 @@ from nailed_it_training.critic import (
     hashing_embedder,
     load_verdicts_jsonl,
     truth_to_target,
+    wilson_upper,
 )
 from nailed_it_training.protocol import Read, ReadCategory, Truth, VerdictRecord
-from nailed_it_training.verifier import VerdictLabel, VerifierVerdict
+from nailed_it_training.synthetic import generate_personas, keyword_rules, synthetic_verdicts
+from nailed_it_training.verifier import KeywordVerifier, VerdictLabel, VerifierVerdict
 
 
 def make_record(read_id: str, text: str, truth: Truth, digest: str = "d1", confidence: float = 0.6) -> VerdictRecord:
@@ -113,25 +115,54 @@ class TestAudit:
             ("d1", "c"): vv(VerdictLabel.SUPPORTED),
             ("d1", "d"): vv(VerdictLabel.CONTRADICTED),
         }
-        result = audit_verifier(records, verdicts, min_overlap=1)
+        result = audit_verifier(records, verdicts)
         assert result.overlap == 4
         assert result.agreement == pytest.approx((1 + 1 + 0.5 + 0) / 4)
-        assert result.status is AuditStatus.STOP
+        assert result.status is AuditStatus.INSUFFICIENT_DATA
 
     def test_unverifiable_and_unmatched_reads_are_outside_the_overlap(self) -> None:
         records = [make_record("a", "t", Truth.NAILED), make_record("b", "t", Truth.OFF), make_record("z", "t", Truth.OFF)]
         verdicts = {("d1", "a"): vv(VerdictLabel.SUPPORTED), ("d1", "b"): vv(VerdictLabel.UNVERIFIABLE)}
-        result = audit_verifier(records, verdicts, min_overlap=1)
+        result = audit_verifier(records, verdicts)
         assert result.overlap == 1
         assert result.agreement == 1.0
+
+    def test_stops_only_when_wilson_upper_bound_is_below_threshold(self) -> None:
+        records = [make_record(str(i), "t", Truth.NAILED) for i in range(40)]
+        bad = {("d1", str(i)): vv(VerdictLabel.SUPPORTED if i < 20 else VerdictLabel.CONTRADICTED) for i in range(40)}
+        result = audit_verifier(records, bad)
+        assert result.agreement == pytest.approx(0.5)
+        assert result.upper_bound < 0.75
+        assert result.status is AuditStatus.STOP
+
+    def test_point_estimate_below_threshold_is_not_enough_to_stop(self) -> None:
+        records = [make_record(str(i), "t", Truth.NAILED) for i in range(40)]
+        verdicts = {("d1", str(i)): vv(VerdictLabel.SUPPORTED if i < 28 else VerdictLabel.CONTRADICTED) for i in range(40)}
+        result = audit_verifier(records, verdicts)
+        assert result.agreement == pytest.approx(0.7)
+        assert result.upper_bound >= 0.75
         assert result.status is AuditStatus.OK
 
-    def test_small_overlap_is_insufficient_not_ok(self) -> None:
-        records = [make_record("a", "t", Truth.NAILED)]
-        result = audit_verifier(records, {("d1", "a"): vv(VerdictLabel.SUPPORTED)}, min_overlap=10)
+    def test_fewer_than_thirty_overlapping_reads_never_stops(self) -> None:
+        records = [make_record(str(i), "t", Truth.NAILED) for i in range(29)]
+        verdicts = {("d1", str(i)): vv(VerdictLabel.CONTRADICTED) for i in range(29)}
+        result = audit_verifier(records, verdicts)
+        assert result.agreement == 0.0
         assert result.status is AuditStatus.INSUFFICIENT_DATA
 
-    def test_exactly_at_threshold_is_ok(self) -> None:
-        records = [make_record(str(i), "t", Truth.NAILED) for i in range(4)]
-        verdicts = {("d1", str(i)): vv(VerdictLabel.SUPPORTED if i < 3 else VerdictLabel.CONTRADICTED) for i in range(4)}
-        assert audit_verifier(records, verdicts, min_overlap=4).status is AuditStatus.OK
+    def test_seed_zero_synthetic_case_from_wave_one_no_longer_halts(self) -> None:
+        personas = generate_personas(12, seed=0)
+        records = synthetic_verdicts(personas, reads_per_person=6, seed=0, flip_rate=0.1, partly_rate=0.1)
+        verifier = KeywordVerifier(keyword_rules())
+        items = {p.digest.digest_id: p.digest.items for p in personas}
+        verdicts = {(r.digest_id, r.read.id): verifier.verify(r.read.text, items[r.digest_id]) for r in records}
+        result = audit_verifier(records, verdicts)
+        assert result.agreement == pytest.approx(0.713, abs=0.001)
+        assert result.overlap == 47
+        assert result.status is AuditStatus.OK
+
+    def test_wilson_upper_bound_known_value(self) -> None:
+        assert wilson_upper(0.5, 100) == pytest.approx(0.5967, abs=1e-3)
+        assert wilson_upper(1.0, 10) == pytest.approx(1.0)
+        with pytest.raises(ValueError):
+            wilson_upper(0.5, 0)

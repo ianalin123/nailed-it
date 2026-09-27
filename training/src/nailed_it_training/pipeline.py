@@ -6,17 +6,16 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from nailed_it_training.base_rate import estimate_base_rate
-from nailed_it_training.critic import AuditResult, AuditStatus, Critic, audit_verifier, hashing_embedder
+from nailed_it_training.base_rate import BaseRateSource
+from nailed_it_training.critic import AUDIT_MIN_OVERLAP, AuditResult, AuditStatus, Critic, audit_verifier, hashing_embedder
 from nailed_it_training.episodes import Episode, EpisodeKind, SplitConfig, build_episodes
 from nailed_it_training.eval import AblationRow, EvalMetrics, ScoredDeck, compute_metrics, render_ablation_table
 from nailed_it_training.fake_backend import FAKE_BASE, FAKE_TEACHER
-from nailed_it_training.protocol import EvidenceDigest, EvidenceItem, Read, VerdictRecord
+from nailed_it_training.protocol import EvidenceDigest, Read, VerdictRecord
 from nailed_it_training.reader import MalformedDeckError, parse_reads, render_reader_prompt
 from nailed_it_training.reward import Gate, RewardConfig, ScoredRead, deck_reward, score_read
 from nailed_it_training.river_adapter import CheckpointRef, ModelRef, RlConfig, RlRow, SftConfig, SftExample, TrainerBackend
-from nailed_it_training.synthetic import Persona, generate_personas
-from nailed_it_training.verifier import Verifier, VerifierVerdict, detect_restatement
+from nailed_it_training.verifier import VerdictLabel, Verifier, is_restatement
 
 
 class BenchmarkTamperedError(RuntimeError):
@@ -31,11 +30,14 @@ class VerifierDistrustedError(RuntimeError):
     pass
 
 
+class StageAStarvedError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     seed: int = 0
-    n_train_personas: int = 12
-    n_eval_personas: int = 3
+    heldout_digest_ids: frozenset[str] = frozenset()
     time_window_fraction: float = 0.2
     split: SplitConfig = field(default_factory=lambda: SplitConfig(n_temporal=3))
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -51,7 +53,7 @@ class PipelineConfig:
     max_tokens: int = 2048
     malformed_reward: float = -2.0
     require_audit: bool = False
-    min_audit_overlap: int = 20
+    min_audit_overlap: int = AUDIT_MIN_OVERLAP
     base_model: str = FAKE_BASE
     teacher_model: str = FAKE_TEACHER
 
@@ -132,40 +134,31 @@ def hold_out_time_window(digest: EvidenceDigest, *, fraction: float, min_hidden:
 
 
 class DeckScorer:
-    def __init__(
-        self,
-        verifier: Verifier,
-        population: Mapping[str, Sequence[EvidenceItem]],
-        config: RewardConfig,
-        critic: Critic | None = None,
-    ) -> None:
+    """Scores a deck with batched verifier calls: one pass over hidden items, one over visible items for restatement."""
+
+    def __init__(self, verifier: Verifier, base_rates: BaseRateSource, config: RewardConfig, critic: Critic | None = None) -> None:
         self._verifier = verifier
-        self._population = population
+        self._base_rates = base_rates
         self._config = config
         self._critic = critic
-        self._base_rates: dict[tuple[str, str], float] = {}
-
-    def base_rate(self, read_text: str, subject: str) -> float:
-        key = (read_text, subject)
-        if key not in self._base_rates:
-            self._base_rates[key] = estimate_base_rate(read_text, self._population, self._verifier, exclude=subject).value
-        return self._base_rates[key]
-
-    def score_one(self, episode: Episode, read: Read) -> ScoredRead:
-        verdict: VerifierVerdict = self._verifier.verify(read.text, episode.hidden)
-        entailed = detect_restatement(read.text, episode.visible, self._verifier, self._config.min_verdict_strength)
-        return score_read(
-            read,
-            visible_ids=episode.visible_ids,
-            verdict=verdict,
-            base_rate=self.base_rate(read.text, episode.digest_id),
-            config=self._config,
-            entailed_by_visible=entailed,
-            critic=self._critic.predict(read) if self._critic else None,
-        )
 
     def score(self, episode: Episode, reads: Sequence[Read]) -> ScoredDeck:
-        scored = tuple(self.score_one(episode, r) for r in reads)
+        texts = [r.text for r in reads]
+        verdicts = self._verifier.verify_many(texts, episode.hidden)
+        entailed = [is_restatement(v, self._config.min_verdict_strength) for v in self._verifier.verify_many(texts, episode.visible)]
+        rates = self._base_rates.base_rates(reads, episode.digest_id)
+        scored = tuple(
+            score_read(
+                read,
+                visible_ids=episode.visible_ids,
+                verdict=verdict,
+                base_rate=rate,
+                config=self._config,
+                entailed_by_visible=ent,
+                critic=self._critic.predict(read) if self._critic else None,
+            )
+            for read, verdict, rate, ent in zip(reads, verdicts, rates, entailed, strict=True)
+        )
         return ScoredDeck(reads=scored, reward=deck_reward(reads, [s.reward for s in scored], self._config))
 
 
@@ -229,8 +222,8 @@ def correctness_reward(verifier: Verifier, episodes: Mapping[str, Episode]) -> R
             reads = parse_reads(completion, model_version="policy")
         except MalformedDeckError:
             return 0.0
-        hidden = episodes[row.row_id].hidden
-        return sum(verifier.verify(r.text, hidden).label.value == "supported" for r in reads) / len(reads)
+        verdicts = verifier.verify_many([r.text for r in reads], episodes[row.row_id].hidden)
+        return sum(v.label is VerdictLabel.SUPPORTED for v in verdicts) / len(reads)
 
     return reward
 
@@ -280,59 +273,73 @@ def run_audit(
         if config.require_audit:
             raise VerifierDistrustedError("require_audit is set but no human verdicts were provided")
         return None
-    verifier_verdicts = {}
+    by_digest: dict[str, list[VerdictRecord]] = {}
     for record in verdicts:
         if record.digest_id not in digests:
             raise KeyError(f"verdict for unknown digest {record.digest_id}; audit must run where that evidence lives")
-        verifier_verdicts[(record.digest_id, record.read.id)] = verifier.verify(record.read.text, digests[record.digest_id].items)
+        by_digest.setdefault(record.digest_id, []).append(record)
+    verifier_verdicts = {}
+    for digest_id, records in by_digest.items():
+        judged = verifier.verify_many([r.read.text for r in records], digests[digest_id].items)
+        verifier_verdicts.update({(digest_id, r.read.id): v for r, v in zip(records, judged, strict=True)})
     result = audit_verifier(verdicts, verifier_verdicts, min_overlap=config.min_audit_overlap)
     if result.status is AuditStatus.STOP:
-        raise VerifierDistrustedError(f"verifier/human agreement {result.agreement:.3f} < {result.threshold} on {result.overlap} reads")
+        raise VerifierDistrustedError(
+            f"verifier/human agreement {result.agreement:.3f} (Wilson 95% upper {result.upper_bound:.3f}) "
+            f"< {result.threshold} on {result.overlap} reads"
+        )
     if result.status is AuditStatus.INSUFFICIENT_DATA and config.require_audit:
         raise VerifierDistrustedError(f"only {result.overlap} overlapping reads, need {config.min_audit_overlap}")
     return result
 
 
-def _split_people(
-    personas: Sequence[Persona], config: PipelineConfig
+def _split_digests(
+    digests: Sequence[EvidenceDigest], config: PipelineConfig
 ) -> tuple[list[EvidenceDigest], list[Episode], FrozenBenchmark, frozenset[str]]:
-    train_people = personas[: config.n_train_personas]
-    eval_people = personas[config.n_train_personas :]
+    unknown = config.heldout_digest_ids - {d.digest_id for d in digests}
+    if unknown:
+        raise ValueError(f"held-out digest ids not in the input: {sorted(unknown)}")
     training_digests: list[EvidenceDigest] = []
     benchmark_episodes: list[Episode] = []
-    for persona in train_people:
-        truncated, window = hold_out_time_window(persona.digest, fraction=config.time_window_fraction, min_hidden=config.split.min_hidden)
+    for digest in digests:
+        if digest.digest_id in config.heldout_digest_ids:
+            benchmark_episodes.extend(build_episodes(digest, config.split, config.seed))
+            continue
+        truncated, window = hold_out_time_window(digest, fraction=config.time_window_fraction, min_hidden=config.split.min_hidden)
+        if window is None:
+            raise ValueError(f"digest {digest.digest_id} has too few dated items to hold out a time window")
         training_digests.append(truncated)
-        if window is not None:
-            benchmark_episodes.append(window)
-    for persona in eval_people:
-        benchmark_episodes.extend(build_episodes(persona.digest, config.split, config.seed))
+        benchmark_episodes.append(window)
+    if not training_digests:
+        raise ValueError("every digest is held out; nothing left to train on")
     training_episodes = [e for d in training_digests for e in build_episodes(d, config.split, config.seed)]
     benchmark = freeze_benchmark(benchmark_episodes)
     assert_no_leakage(benchmark, training_episodes)
-    return training_digests, training_episodes, benchmark, frozenset(p.digest.digest_id for p in eval_people)
+    return training_digests, training_episodes, benchmark, config.heldout_digest_ids
 
 
 def run_pipeline(
     backend: TrainerBackend,
     verifier: Verifier,
+    base_rates: BaseRateSource,
+    digests: Sequence[EvidenceDigest],
     config: PipelineConfig,
     *,
-    personas: Sequence[Persona] | None = None,
     verdicts: Sequence[VerdictRecord] | None = None,
 ) -> PipelineResult:
-    people = list(personas) if personas is not None else generate_personas(config.n_train_personas + config.n_eval_personas, config.seed)
-    if len(people) <= config.n_train_personas:
-        raise ValueError("need more personas than n_train_personas so at least one person is held out")
-    training_digests, training_episodes, benchmark, eval_ids = _split_people(people, config)
-    population = {d.digest_id: d.items for d in training_digests}
+    """Stages A and B on owner-approved digests, then the ablation on the frozen benchmark."""
+    training_digests, training_episodes, benchmark, eval_ids = _split_digests(digests, config)
 
-    audit = run_audit(verdicts, {p.digest.digest_id: p.digest for p in people}, verifier, config)
+    audit = run_audit(verdicts, {d.digest_id: d for d in digests}, verifier, config)
     critic = Critic.fit(verdicts, hashing_embedder(64), seed=config.seed) if verdicts else None
-    scorer = DeckScorer(verifier, population, config.reward, critic)
-    eval_scorer = DeckScorer(verifier, population, config.reward)
-
+    scorer = DeckScorer(verifier, base_rates, config.reward, critic)
+    eval_scorer = DeckScorer(verifier, base_rates, config.reward)
     stage_a = run_stage_a(backend, scorer, training_episodes, config)
+    if not stage_a.verified_examples:
+        raise StageAStarvedError(
+            f"stage A kept {len(stage_a.survivors)} of {stage_a.n_teacher_reads} teacher reads but no deck had "
+            f"{config.min_survivors}+ survivors; sample more teacher decks or lower min_survivors"
+        )
     raw_ckpt = backend.start_sft(
         backend.upload_dataset("raw-teacher", stage_a.raw_examples),
         SftConfig(name="sft-raw", base_model=config.base_model, steps=config.sft_steps),

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from nailed_it_training.protocol import (
     PROTOCOL_VERSION,
+    ChainKind,
     Deck,
     EvidenceDigest,
     Read,
@@ -115,3 +116,23 @@ def test_rejects_unknown_source_kind() -> None:
     data["items"][0]["source"] = "diary"
     with pytest.raises(ValidationError):
         EvidenceDigest.model_validate(data)
+
+
+def test_read_accepts_optional_chain_matching_typescript() -> None:
+    chain = [{"kind": "evidence", "text": "[e1] Committed at 02:14 again."}, {"kind": "inference", "text": "Works late."}]
+    read = Read.model_validate({**READ_JSON, "chain": chain})
+    assert read.chain is not None
+    assert read.chain[0].kind is ChainKind.EVIDENCE
+    assert Read.model_validate(READ_JSON).chain is None
+    dumped = json.loads(read.model_dump_json(by_alias=True, exclude_none=True))
+    assert dumped["chain"] == chain
+
+
+def test_chain_is_capped_at_six_steps_and_240_chars() -> None:
+    step = {"kind": "inference", "text": "x"}
+    with pytest.raises(ValidationError):
+        Read.model_validate({**READ_JSON, "chain": [step] * 7})
+    with pytest.raises(ValidationError):
+        Read.model_validate({**READ_JSON, "chain": [{"kind": "inference", "text": "x" * 241}]})
+    with pytest.raises(ValidationError):
+        Read.model_validate({**READ_JSON, "chain": [{"kind": "guess", "text": "x"}]})

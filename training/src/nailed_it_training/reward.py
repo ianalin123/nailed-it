@@ -1,16 +1,21 @@
 """Information-gain reward, gates, and deck-level reward (spec Ideas 2, 3, 4)."""
 
 import math
+import re
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import combinations
 
 from nailed_it_training.critic import CriticEstimate
-from nailed_it_training.protocol import Read, ReadCategory
+from nailed_it_training.protocol import ChainKind, ChainStep, Read, ReadCategory
 from nailed_it_training.verifier import VerdictLabel, VerifierVerdict
 
 Similarity = Callable[[str, str], float]
+
+DECK_SIZE = 12
+ASSERTION_THRESHOLD = 0.5
+_CHAIN_ID = re.compile(r"^\[([^\]\s]+)\]")
 
 
 class Gate(StrEnum):
@@ -26,13 +31,17 @@ class RewardConfig:
     min_verdict_strength: float = 0.5
     redundancy_weight: float = 1.0
     coverage_weight: float = 0.5
+    deck_size: int = DECK_SIZE
+    size_penalty: float = 0.25
 
     def __post_init__(self) -> None:
         _require_eps(self.eps)
         if not 0.0 <= self.min_verdict_strength <= 1.0:
             raise ValueError(f"min_verdict_strength must be in [0, 1], got {self.min_verdict_strength}")
-        if self.redundancy_weight < 0 or self.coverage_weight < 0:
-            raise ValueError("redundancy_weight and coverage_weight must be non-negative")
+        if self.redundancy_weight < 0 or self.coverage_weight < 0 or self.size_penalty < 0:
+            raise ValueError("redundancy_weight, coverage_weight and size_penalty must be non-negative")
+        if self.deck_size < 1:
+            raise ValueError("deck_size must be positive")
 
 
 @dataclass(frozen=True)
@@ -48,9 +57,10 @@ class ScoredRead:
 
 @dataclass(frozen=True)
 class DeckReward:
-    read_sum: float
+    read_mean: float
     redundancy: float
     coverage: float
+    size_penalty: float
     total: float
 
 
@@ -90,12 +100,33 @@ def expected_information_gain(confidence: float, p_true: float, base_rate: float
     )
 
 
+def chain_evidence_id(step: ChainStep) -> str | None:
+    """Evidence steps quote a visible item as "[<id>] <quote>". The protocol has no id field for this yet."""
+    match = _CHAIN_ID.match(step.text)
+    return match.group(1) if match else None
+
+
+def _chain_grounded(chain: list[ChainStep], visible_ids: Collection[str]) -> bool:
+    evidence = [step for step in chain if step.kind is ChainKind.EVIDENCE]
+    if not evidence:
+        return False
+    return all((eid := chain_evidence_id(step)) is not None and eid in visible_ids for step in evidence)
+
+
 def check_gates(read: Read, visible_ids: Collection[str], entailed_by_visible: bool = False) -> Gate:
+    """Grounding first, then restatement. Restatement is measured entailment only; self-reported hops is ignored."""
     if not read.evidence_ids or any(eid not in visible_ids for eid in read.evidence_ids):
         return Gate.UNGROUNDED
-    if read.hops == 0 or entailed_by_visible:
+    if read.chain is not None and not _chain_grounded(read.chain, visible_ids):
+        return Gate.UNGROUNDED
+    if entailed_by_visible:
         return Gate.RESTATEMENT
     return Gate.PASSED
+
+
+def assertion_floor(confidence: float, reward: float) -> float:
+    """A read is an assertion: below 0.5 confidence it can lose but never win."""
+    return min(reward, 0.0) if confidence < ASSERTION_THRESHOLD else reward
 
 
 def _decided_outcome(verdict: VerifierVerdict, min_strength: float) -> int | None:
@@ -134,11 +165,13 @@ def score_read(
 
     outcome = _decided_outcome(verdict, config.min_verdict_strength)
     if outcome is not None:
-        return result(outcome, information_gain(read.confidence, outcome, base_rate, config.eps))
+        gain = information_gain(read.confidence, outcome, base_rate, config.eps)
+        return result(outcome, assertion_floor(read.confidence, gain))
     if critic is None:
         return result(None, 0.0)
     certainty = 1.0 - critic.uncertainty
-    return result(None, certainty * expected_information_gain(read.confidence, critic.p_confirm, base_rate, config.eps))
+    gain = certainty * expected_information_gain(read.confidence, critic.p_confirm, base_rate, config.eps)
+    return result(None, assertion_floor(read.confidence, gain))
 
 
 def _tokens(text: str) -> frozenset[str]:
@@ -175,11 +208,12 @@ def deck_reward(
         raise ValueError(f"got {len(reads)} reads but {len(read_rewards)} rewards")
     if not reads:
         raise ValueError("a deck needs at least one read")
-    read_sum = float(sum(read_rewards))
+    read_mean = float(sum(read_rewards)) / len(read_rewards)
     redundancy = mean_pairwise_similarity([r.text for r in reads], similarity)
     coverage = category_coverage([r.category for r in reads])
-    total = read_sum - config.redundancy_weight * redundancy + config.coverage_weight * coverage
-    return DeckReward(read_sum=read_sum, redundancy=redundancy, coverage=coverage, total=total)
+    size_penalty = config.size_penalty * abs(len(reads) - config.deck_size)
+    total = read_mean - config.redundancy_weight * redundancy + config.coverage_weight * coverage - size_penalty
+    return DeckReward(read_mean=read_mean, redundancy=redundancy, coverage=coverage, size_penalty=size_penalty, total=total)
 
 
 def share_deck_reward(result: DeckReward, n_reads: int) -> list[float]:
