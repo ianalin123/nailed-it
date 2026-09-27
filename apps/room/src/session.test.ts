@@ -5,8 +5,10 @@ import { createSession, handleClose, handleMessage, type Outbound, type Session,
 
 const deps = (): SessionDeps => {
   let counter = 0;
+  let tokens = 0;
   return {
     newPlayerId: () => `generated-${(counter += 1)}`,
+    newToken: () => `token-${(tokens += 1)}`,
     random: () => 0,
     now: () => "2026-09-27T12:00:00.000Z",
   };
@@ -62,7 +64,7 @@ describe("session", () => {
     const afterClose = sendsTo(step.outbound, "c2")[0];
     expect(afterClose?.type === "state" && afterClose.state.players[0]?.connected).toBe(false);
 
-    step = run(step.session, "c3", { type: "join", nickname: "Ana", playerId: "generated-1" }, d);
+    step = run(step.session, "c3", { type: "join", nickname: "Ana", playerId: "generated-1", token: "token-1" }, d);
     const welcome = sendsTo(step.outbound, "c3")[0];
     expect(welcome).toMatchObject({ type: "welcome", playerId: "generated-1" });
     expect(welcome?.type === "welcome" && welcome.state.players[0]?.connected).toBe(true);
@@ -71,7 +73,7 @@ describe("session", () => {
   it("keeps a player connected while another of their connections is open", () => {
     const d = deps();
     let step = run(createSession("ABCD"), "c1", { type: "join", nickname: "Ana" }, d);
-    step = run(step.session, "c2", { type: "join", nickname: "Ana", playerId: "generated-1" }, d);
+    step = run(step.session, "c2", { type: "join", nickname: "Ana", playerId: "generated-1", token: "token-1" }, d);
     step = handleClose(step.session, "c1");
     expect(step.session.state.players[0]?.connected).toBe(true);
     step = handleClose(step.session, "c2");
@@ -113,5 +115,42 @@ describe("session", () => {
       expect(ServerMessage.safeParse(message).success).toBe(true);
       expect(message?.type === "state" && message.state.round?.truth).toBe("nailed");
     }
+  });
+
+  it("issues a reconnect token only in the welcome, never in broadcast state", () => {
+    const d = deps();
+    let step = run(createSession("ABCD"), "c1", { type: "join", nickname: "Ana" }, d);
+    expect(sendsTo(step.outbound, "c1")[0]).toMatchObject({ type: "welcome", reconnectToken: "token-1" });
+    step = run(step.session, "c2", { type: "join", nickname: "Bo" }, d);
+    step = run(step.session, "c1", { type: "submit_deck", deck: makeDeck("ana") }, d);
+    const everything = JSON.stringify(step.outbound);
+    expect(everything).not.toContain("token-1");
+    expect(everything).not.toContain("token-2");
+    expect(JSON.stringify(sendsTo(run(step.session, "c3", { type: "join", nickname: "Cy" }, d).outbound, "c3"))).not.toContain(
+      "token-1",
+    );
+  });
+
+  it.each([
+    ["no token", { type: "join", nickname: "Mallory", playerId: "generated-1" }],
+    ["a wrong token", { type: "join", nickname: "Mallory", playerId: "generated-1", token: "token-2" }],
+    ["an unknown player id", { type: "join", nickname: "Mallory", playerId: "made-up", token: "token-1" }],
+  ])("rejects taking over a player with %s", (_label, message) => {
+    const d = deps();
+    let step = run(createSession("ABCD"), "c1", { type: "join", nickname: "Ana" }, d);
+    step = run(step.session, "c2", { type: "join", nickname: "Bo" }, d);
+    const before = step.session;
+    const attack = run(step.session, "c9", message, d);
+    expect(sendsTo(attack.outbound, "c9")).toEqual([expect.objectContaining({ type: "error", code: "bad_token" })]);
+    expect(attack.session).toBe(before);
+    expect(sendsTo(attack.outbound, "c1")).toEqual([]);
+  });
+
+  it("restores tokens so a player can rejoin after a server restart", () => {
+    const d = deps();
+    const first = run(createSession("ABCD"), "c1", { type: "join", nickname: "Ana" }, d);
+    const restored = createSession("ABCD", first.session.state, first.session.tokenByPlayer);
+    const step = run(restored, "c5", { type: "join", nickname: "Ana", playerId: "generated-1", token: "token-1" }, d);
+    expect(sendsTo(step.outbound, "c5")[0]).toMatchObject({ type: "welcome", playerId: "generated-1" });
   });
 });

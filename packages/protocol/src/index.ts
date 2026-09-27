@@ -120,7 +120,13 @@ export const RoomState = z.object({
 export type RoomState = z.infer<typeof RoomState>;
 
 export const ClientMessage = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("join"), nickname: z.string().min(1).max(20), playerId: z.string().optional() }),
+  z.object({
+    type: z.literal("join"),
+    nickname: z.string().min(1).max(20),
+    // Rejoining as an existing player requires the token from that player's welcome.
+    playerId: z.string().optional(),
+    token: z.string().optional(),
+  }),
   z.object({ type: z.literal("submit_deck"), deck: Deck }),
   z.object({ type: z.literal("start"), cardsPerPlayer: z.number().int().min(1).max(10) }),
   z.object({ type: z.literal("guess"), readId: z.string(), guess: Guess }),
@@ -138,11 +144,13 @@ export const ErrorCode = z.enum([
   "not_enough_players",
   "not_enough_decks",
   "unknown_read",
+  "bad_token",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 
 export const ServerMessage = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("welcome"), playerId: z.string(), state: RoomState }),
+  // reconnectToken is a secret. It is sent only here, to the joining connection, never in state.
+  z.object({ type: z.literal("welcome"), playerId: z.string(), reconnectToken: z.string().optional(), state: RoomState }),
   z.object({ type: z.literal("state"), state: RoomState }),
   z.object({ type: z.literal("error"), code: ErrorCode, message: z.string() }),
 ]);

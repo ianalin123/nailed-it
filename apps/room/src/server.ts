@@ -15,12 +15,14 @@ import {
 } from "./session";
 
 const STATE_KEY = "state";
+const TOKENS_KEY = "tokens";
 const VERDICT_PREFIX = "verdict:";
 
 const verdictKey = (sequence: number): string => `${VERDICT_PREFIX}${String(sequence).padStart(6, "0")}`;
 
 const liveDeps: SessionDeps = {
   newPlayerId: () => crypto.randomUUID(),
+  newToken: () => crypto.randomUUID(),
   random: () => Math.random(),
   now: () => new Date().toISOString(),
 };
@@ -33,7 +35,8 @@ export class Room extends Server {
 
   async onStart(): Promise<void> {
     const stored = await this.ctx.storage.get<InternalState>(STATE_KEY);
-    this.session = createSession(this.name, stored ? disconnectEveryone(stored) : undefined);
+    const tokens = await this.ctx.storage.get<[string, string][]>(TOKENS_KEY);
+    this.session = createSession(this.name, stored ? disconnectEveryone(stored) : undefined, new Map(tokens ?? []));
   }
 
   onConnect(connection: Connection): void {
@@ -63,12 +66,14 @@ export class Room extends Server {
 
   private async commit(step: SessionStep): Promise<void> {
     const changed = step.session.state !== this.session?.state;
+    const tokensChanged = step.session.tokenByPlayer !== this.session?.tokenByPlayer;
     this.session = step.session;
     for (const outbound of step.outbound) this.deliver(outbound);
     const writes: Promise<void>[] = step.outbound.flatMap((o) =>
       o.kind === "persist_verdict" ? [this.ctx.storage.put(verdictKey(o.sequence), o.record)] : [],
     );
     if (changed) writes.push(this.ctx.storage.put(STATE_KEY, step.session.state));
+    if (tokensChanged) writes.push(this.ctx.storage.put(TOKENS_KEY, [...step.session.tokenByPlayer]));
     await Promise.all(writes);
   }
 
