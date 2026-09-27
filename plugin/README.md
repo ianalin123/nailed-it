@@ -49,7 +49,7 @@ never show it on a shared screen.
 ## Development
 
 ```fish
-cd /Users/ianalin/nailed-it
+cd nailed-it
 pnpm add --filter @nailed-it/plugin <pkg>   # add a dependency
 pnpm --filter @nailed-it/plugin test
 pnpm --filter @nailed-it/plugin typecheck
@@ -59,7 +59,7 @@ claude plugin validate ./plugin --strict
 ### Running a script directly
 
 ```fish
-cd /Users/ianalin/nailed-it/plugin
+cd plugin
 pnpm exec tsx scripts/validate.ts path/to/digest.json
 pnpm exec tsx scripts/redact.ts path/to/digest.json
 env NAILED_IT_TOKEN=t1 pnpm exec tsx scripts/submit-deck.ts --room ABCD --player-id p1 --deck path/to/deck.json --host localhost:8787
