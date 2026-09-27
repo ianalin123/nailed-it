@@ -13,7 +13,7 @@ const TILT: Record<Truth, string> = { nailed: "-9deg", partly: "6deg", off: "-4d
 type StampSize = "stage" | "lg" | "sm";
 
 const SIZE: Record<StampSize, string> = {
-  stage: "border-[0.45vw] px-[1.6vw] py-[0.7vw] text-[5vw]",
+  stage: "border-[calc(var(--u)*0.35)] px-[calc(var(--u)*1.1)] py-[calc(var(--u)*0.45)] text-[calc(var(--u)*3.2)]",
   lg: "border-[5px] px-4 py-2 text-[clamp(2rem,9vw,3.6rem)]",
   sm: "border-[3px] px-2 py-1 text-lg",
 };

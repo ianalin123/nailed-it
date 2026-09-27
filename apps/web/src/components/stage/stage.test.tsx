@@ -91,6 +91,40 @@ describe("StageScreen", () => {
     expect(within(chain).getAllByRole("listitem")).toHaveLength(3);
   });
 
+  it("truncates a chain that can't fit, keeping the last inference and the read", () => {
+    const long = "x ".repeat(120);
+    const state = makeState({
+      status: "playing",
+      round: makeRound({
+        hotSeatPlayerId: "b",
+        phase: "reveal",
+        truth: "nailed",
+        guesses: {},
+        pointsAwarded: {},
+        chain: [
+          { kind: "evidence", text: long },
+          { kind: "evidence", text: long },
+          { kind: "inference", text: long },
+          { kind: "evidence", text: long },
+          { kind: "inference", text: long },
+          { kind: "inference", text: `last ${long}`.slice(0, 240) },
+        ],
+      }),
+    });
+    mountStage(state);
+    const items = within(screen.getByRole("region", { name: "How it knew" })).getAllByRole("listitem");
+    const texts = items.map((item) => item.textContent ?? "");
+    expect(texts.some((text) => /^\+\d+ more steps?$/.test(text))).toBe(true);
+    expect(texts.at(-2)).toMatch(/^Figuredlast/);
+    expect(texts.at(-1)).toMatch(/^So/);
+  });
+
+  it("puts a 12-player leaderboard in two columns", () => {
+    const players = Array.from({ length: 12 }, (_, index) => makePlayer({ id: `p${index}`, nickname: `P${index}`, score: index }));
+    mountStage(makeState({ status: "finished", players }));
+    expect(screen.getAllByRole("list")[0]?.className).toContain("grid-cols-2");
+  });
+
   it("shows the leaderboard and reader accuracy at the end", () => {
     mountStage(makeState({ status: "finished", readerAccuracy: 0.5 }));
     expect(screen.getByText("Final scores")).toBeTruthy();

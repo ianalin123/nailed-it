@@ -5,15 +5,18 @@ import { deckCount } from "@/lib/game/selectors";
 import { roomUrls } from "@/lib/game/urls";
 import { cx } from "../cx";
 import { useOrigin } from "../useOrigin";
+import { fontU, u } from "./geometry";
 import type { StageProps } from "./types";
+
+const QR_U = 17;
 
 function JoinCard({ code }: { code: string }) {
   const origin = useOrigin();
-  if (!origin) return <div className="aspect-square w-[19vw] rounded-[1vw] bg-field-deep" aria-hidden />;
+  if (!origin) return <div aria-hidden className="rounded-lg bg-field-deep" style={{ width: u(QR_U + 2.2), height: u(QR_U + 2.2) }} />;
   const urls = roomUrls(origin, code);
   return (
-    <figure className="flex flex-col items-center gap-[1vw]">
-      <div className="rounded-[1vw] bg-slip p-[1.1vw]">
+    <figure className="flex flex-col items-center" style={{ gap: u(1) }}>
+      <div className="rounded-lg bg-slip" style={{ padding: u(1.1) }}>
         <QRCodeSVG
           value={urls.join}
           size={512}
@@ -22,10 +25,10 @@ function JoinCard({ code }: { code: string }) {
           fgColor="#121a5c"
           bgColor="#f2f4f3"
           title={`Scan to join room ${code}`}
-          style={{ width: "17vw", height: "17vw" }}
+          style={{ width: u(QR_U), height: u(QR_U), display: "block" }}
         />
       </div>
-      <figcaption className="max-w-[21vw] text-center font-machine text-[1.25vw] break-all text-field-soft">
+      <figcaption className="text-center font-machine break-all text-field-soft" style={{ ...fontU(1.1), maxWidth: u(QR_U + 2.2) }}>
         {urls.display}/room/{code}
       </figcaption>
     </figure>
@@ -35,32 +38,44 @@ function JoinCard({ code }: { code: string }) {
 export function StageLobby({ room }: StageProps) {
   const decks = deckCount(room);
   return (
-    <div className="grid flex-1 grid-cols-[auto_1fr] items-start gap-[4vw]">
+    <div className="grid h-full grid-cols-[auto_1fr] items-start" style={{ gap: u(4) }}>
       <JoinCard code={room.code} />
-      <div className="flex min-w-0 flex-col gap-[2.5vw]">
+      <div className="flex min-w-0 flex-col" style={{ gap: u(2.5) }}>
         <div>
-          <p className="text-[2vw] text-field-soft">Scan the code with your phone, or enter</p>
-          <p className="wide font-black whitespace-nowrap tracking-[0.06em] text-[10vw] leading-[0.9]">{room.code}</p>
+          <p className="text-field-soft" style={fontU(1.8)}>
+            Scan the code with your phone, or enter
+          </p>
+          <p className="wide font-black whitespace-nowrap" style={{ ...fontU(10, 0.9), letterSpacing: "0.06em" }}>
+            {room.code}
+          </p>
         </div>
         <section>
-          <h2 className="flex items-baseline justify-between border-b-[0.2vw] border-field-soft/30 pb-[0.6vw] text-[1.7vw]">
+          <h2 className="flex items-baseline justify-between border-b-2 border-field-soft/30" style={{ ...fontU(1.6), paddingBottom: u(0.6) }}>
             <span className="wide font-extrabold">In the room</span>
             <span className="text-field-soft">
               {room.players.length} here, {decks} {decks === 1 ? "deck" : "decks"}
             </span>
           </h2>
           {room.players.length === 0 ? (
-            <p className="pt-[1vw] text-[2vw] text-field-soft">Waiting for the first player.</p>
+            <p className="text-field-soft" style={{ ...fontU(1.8), paddingTop: u(1) }}>
+              Waiting for the first player.
+            </p>
           ) : (
-            <ul className="grid grid-cols-3 gap-x-[2vw] gap-y-[0.4vw] pt-[1vw]">
+            <ul className="grid grid-cols-3" style={{ columnGap: u(2), paddingTop: u(1) }}>
               {room.players.map((player) => (
                 <li
                   key={player.id}
-                  className={cx("animate-feed flex min-w-0 items-center gap-[0.8vw] py-[0.4vw]", !player.connected && "opacity-50")}
+                  className={cx("animate-feed flex min-w-0 items-center", !player.connected && "opacity-50")}
+                  style={{ gap: u(0.8), paddingBlock: u(0.4) }}
                 >
-                  <span className="min-w-0 truncate text-[2.4vw] font-bold">{player.nickname}</span>
+                  <span className="min-w-0 truncate font-bold" style={fontU(2.2)}>
+                    {player.nickname}
+                  </span>
                   {player.hasDeck ? (
-                    <span className="wide shrink-0 -rotate-6 rounded-[0.4vw] border-[0.25vw] border-nailed px-[0.5vw] text-[1vw] font-black text-nailed uppercase">
+                    <span
+                      className="wide shrink-0 -rotate-6 rounded border-2 border-nailed font-black text-nailed uppercase"
+                      style={{ ...fontU(1, 1.3), paddingInline: u(0.5) }}
+                    >
                       Deck in
                     </span>
                   ) : null}

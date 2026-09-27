@@ -76,7 +76,7 @@ export function RevealView({ room, viewerId, send }: ViewProps) {
           ))}
         </ul>
       </section>
-      <ChainList chain={round.chain} readText={round.read.text} scale="phone" />
+      <ChainList chain={round.chain} readText={round.read.text} />
       {canAdvance(room, viewerId) ? (
         <ActionButton tone="primary" big onClick={() => send({ type: "next" })}>
           {isLast ? "See final scores" : "Next card"}

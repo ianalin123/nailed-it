@@ -79,6 +79,19 @@
   .wide {
     font-stretch: 125%;
   }
+
+  .stage-root {
+    --u: min(1vw, 1.7778vh);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  @supports (height: 100dvh) {
+    .stage-root {
+      --u: min(1vw, 1.7778dvh);
+      height: 100dvh;
+    }
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
