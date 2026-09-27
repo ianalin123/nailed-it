@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import PartySocket from "partysocket";
 import WS from "ws";
 import type { ClientMessage, Deck, ErrorCode, RoomState } from "@nailed-it/protocol";
-import { parseServerMessage } from "@nailed-it/protocol";
+import { parseServerMessage, ROOM_PARTY } from "@nailed-it/protocol";
 import { validateData } from "./validate";
 import type { ValidationError } from "./validate";
 
@@ -28,7 +28,7 @@ export type SubmitResult =
   | { outcome: "connection_error"; message: string }
   | { outcome: "timeout" };
 
-const DEFAULT_PARTY = "room";
+const DEFAULT_PARTY = ROOM_PARTY;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 export const parseArgs = (argv: string[]): SubmitDeckArgs => {

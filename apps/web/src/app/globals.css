@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@theme {
+  --color-field: #2b3fe0;
+  --color-field-deep: #1d2bab;
+  --color-field-soft: #c9d0ff;
+  --color-slip: #f2f4f3;
+  --color-slip-shade: #dfe3e6;
+  --color-ink: #121a5c;
+  --color-nailed: #ff3d7f;
+  --color-partly: #ffc21a;
+  --color-alarm: #ffd6e3;
+
+  --font-sans: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-machine: "Courier Prime", "Courier New", ui-monospace, monospace;
+
+  --animate-stamp: stamp-slam 420ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+  --animate-feed: slip-feed 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes stamp-slam {
+    0% {
+      opacity: 0;
+      transform: rotate(-3deg) scale(1.9);
+    }
+    60% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0.94;
+      transform: rotate(var(--stamp-tilt, -9deg)) scale(1);
+    }
+  }
+
+  @keyframes slip-feed {
+    0% {
+      clip-path: inset(0 0 100% 0);
+      transform: translateY(-12px);
+    }
+    100% {
+      clip-path: inset(0 0 0 0);
+      transform: translateY(0);
+    }
+  }
+}
+
+@layer base {
+  html {
+    background: var(--color-field);
+    color: white;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    min-height: 100dvh;
+    background: var(--color-field);
+    font-family: var(--font-sans);
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-partly);
+    outline-offset: 3px;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+@layer components {
+  .slip {
+    background: var(--color-slip);
+    color: var(--color-ink);
+    --tooth: 14px;
+    mask:
+      conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / var(--tooth) 100%;
+    padding-bottom: calc(var(--tooth) + 1.5rem);
+  }
+
+  .wide {
+    font-stretch: 125%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

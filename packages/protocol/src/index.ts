@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1;
 
+// The PartyServer party name. Room URLs are /parties/<ROOM_PARTY>/<CODE>.
+export const ROOM_PARTY = "room";
+
 export const ROOM_CODE_LENGTH = 4;
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 12;
