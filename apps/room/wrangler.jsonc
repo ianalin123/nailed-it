@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nailed-it-room",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "Room", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+}

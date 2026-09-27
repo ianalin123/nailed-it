@@ -19,3 +19,4 @@ docs/working/
 training/data/private/
 training/checkpoints/
 *.digest.json
+.wrangler/
