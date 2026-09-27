@@ -1,0 +1,11 @@
+{
+  "name": "nailed-it",
+  "displayName": "Nailed It",
+  "description": "Scans your machine for evidence about how you work and think, builds an owner-approved deck of reads, and submits it to a Nailed It game room.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Nailed It"
+  },
+  "license": "MIT",
+  "keywords": ["party-game", "multiplayer", "profile"]
+}

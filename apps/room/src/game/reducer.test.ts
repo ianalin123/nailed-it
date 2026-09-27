@@ -70,9 +70,11 @@ describe("join", () => {
     const ids = Array.from({ length: MAX_PLAYERS }, (_, i) => `p${i}`);
     const full = apply(lobbyWith(ids, []), { type: "disconnect", playerId: "p3" });
     expect(player(full, "p3").connected).toBe(false);
+    const originalNickname = player(full, "p3").nickname;
     const back = expectOk(reduce(full, { type: "join", playerId: "p3", nickname: "renamed" })).state;
     expect(back.players).toHaveLength(MAX_PLAYERS);
-    expect(player(back, "p3")).toMatchObject({ connected: true, nickname: "renamed" });
+    expect(player(back, "p3")).toMatchObject({ connected: true, nickname: originalNickname });
+    expect(originalNickname).not.toBe("renamed");
   });
 
   it("allows joining mid-game as a guesser", () => {

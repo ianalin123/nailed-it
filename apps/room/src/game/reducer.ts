@@ -55,7 +55,7 @@ const unknownPlayer = (playerId: string): ReduceResult =>
 const handleJoin = (state: InternalState, event: EventOf<"join">): ReduceResult => {
   if (findPlayer(state, event.playerId)) {
     return succeed(
-      updatePlayer(state, event.playerId, (p) => ({ ...p, connected: true, nickname: event.nickname })),
+      updatePlayer(state, event.playerId, (p) => ({ ...p, connected: true })),
     );
   }
   if (state.players.length >= MAX_PLAYERS) {

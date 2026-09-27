@@ -1,0 +1,26 @@
+{
+  "name": "@nailed-it/plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "redact": "tsx scripts/redact.ts",
+    "validate": "tsx scripts/validate.ts",
+    "submit-deck": "tsx scripts/submit-deck.ts"
+  },
+  "dependencies": {
+    "@nailed-it/protocol": "workspace:*",
+    "partysocket": "^1.3.0",
+    "ws": "^8.21.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
