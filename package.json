@@ -1,0 +1,14 @@
+{
+  "name": "nailed-it",
+  "private": true,
+  "packageManager": "pnpm@10.29.3",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
