@@ -45,7 +45,7 @@ const fakeTransport = (): FakeTransport => {
 const setup = () => {
   const transport = fakeTransport();
   const open: OpenTransport = () => ({ ok: true, transport });
-  const hook = renderHook(() => useRoom("ABCD", "Ada", open));
+  const hook = renderHook(() => useRoom("ABCD", { role: "player", nickname: "Ada", create: false }, open));
   return { transport, hook };
 };
 
@@ -114,9 +114,42 @@ describe("useRoom", () => {
 
   it("explains a missing server configuration", () => {
     const open: OpenTransport = () => ({ ok: false, reason: "No host." });
-    const { result } = renderHook(() => useRoom("ABCD", "Ada", open));
+    const { result } = renderHook(() => useRoom("ABCD", { role: "player", nickname: "Ada", create: false }, open));
     expect(result.current.session.connection).toBe("closed");
     expect(result.current.session.notices[0]).toMatchObject({ title: "No room server configured", detail: "No host." });
+  });
+
+  it("creates once, then rejoins without the create flag after a drop", () => {
+    const transport = fakeTransport();
+    const open: OpenTransport = () => ({ ok: true, transport });
+    renderHook(() => useRoom("ABCD", { role: "player", nickname: "Ada", create: true }, open));
+    act(() => transport.setStatus("open"));
+    expect(transport.sent[0]).toEqual({ type: "join", nickname: "Ada", create: true });
+    window.localStorage.clear();
+    act(() => transport.deliver(JSON.stringify({ type: "welcome", playerId: "p1", state: makeState() })));
+    window.localStorage.clear();
+    act(() => transport.setStatus("connecting"));
+    act(() => transport.setStatus("open"));
+    expect(transport.sent.at(-1)).toEqual({ type: "join", nickname: "Ada" });
+  });
+
+  it("reports room_not_found as a join failure, not a toast", () => {
+    const { transport, hook } = setup();
+    act(() => transport.setStatus("open"));
+    act(() => transport.deliver(JSON.stringify({ type: "error", code: "room_not_found", message: "No room ABCD." })));
+    expect(hook.result.current.session.joinFailure).toEqual({ code: "room_not_found", message: "No room ABCD." });
+    expect(hook.result.current.session.notices).toEqual([]);
+  });
+
+  it("joins as a stage without reading or writing a seat", () => {
+    const transport = fakeTransport();
+    const open: OpenTransport = () => ({ ok: true, transport });
+    window.localStorage.setItem("nailed-it:seat:ABCD", JSON.stringify({ playerId: "p1", token: "secret" }));
+    renderHook(() => useRoom("ABCD", { role: "stage" }, open));
+    act(() => transport.setStatus("open"));
+    expect(transport.sent).toEqual([{ type: "join", nickname: "Stage", role: "stage" }]);
+    act(() => transport.deliver(JSON.stringify({ type: "welcome", playerId: "stage-1", state: makeState() })));
+    expect(loadSeat("ABCD")).toEqual({ ok: true, value: { playerId: "p1", token: "secret" } });
   });
 
   it("closes the transport on unmount", () => {

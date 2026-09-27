@@ -45,6 +45,28 @@ describe("sessionReducer", () => {
     expect(next.notices).toEqual([{ id: 1, title: "Only the host can do that", detail: "Nope." }]);
   });
 
+  it("records join failures before a room is known, and clears them on welcome", () => {
+    const failed = sessionReducer(initialSession(), {
+      type: "server_message",
+      message: { type: "error", code: "room_exists", message: "Taken." },
+    });
+    expect(failed.joinFailure).toEqual({ code: "room_exists", message: "Taken." });
+    expect(failed.notices).toEqual([]);
+    const welcomed = sessionReducer(failed, {
+      type: "server_message",
+      message: { type: "welcome", playerId: "p1", state: makeState() },
+    });
+    expect(welcomed.joinFailure).toBeUndefined();
+  });
+
+  it("has a human title for every server error code", () => {
+    const next = sessionReducer(initialSession(), {
+      type: "server_message",
+      message: { type: "error", code: "stage_cannot_act", message: "Display only." },
+    });
+    expect(next.notices[0]?.title).toBe("The big screen only watches");
+  });
+
   it("turns decode failures into visible notices", () => {
     const next = sessionReducer(initialSession(), { type: "decode_failed", detail: "bad" });
     expect(next.notices[0]).toMatchObject({ title: "Received a message this app can't read", detail: "bad" });

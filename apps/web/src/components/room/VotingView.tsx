@@ -11,15 +11,15 @@ import {
   hasVoted,
   hotSeatPlayer,
   roundLabel,
+  viewerGuess,
   voteProgress,
+  type LocalGuess,
 } from "@/lib/game/selectors";
 import { ActionButton } from "../ActionButton";
 import { Slip } from "../Slip";
 import { HotSeatHeading } from "./HotSeatHeading";
 import { VoterStrip } from "./VoterStrip";
 import type { ViewProps } from "./types";
-
-type LocalGuess = { readId: string; guess: Guess };
 
 const GUESS_ORDER: readonly Guess[] = ["nailed", "off"];
 const TRUTH_ORDER: readonly Truth[] = ["nailed", "partly", "off"];
@@ -82,7 +82,7 @@ export function VotingView({ room, viewerId, send }: ViewProps) {
   if (!round) return null;
   const hotSeat = hotSeatPlayer(room);
   const progress = voteProgress(room);
-  const selected = local?.readId === round.read.id ? local.guess : undefined;
+  const selected = viewerGuess(round, local);
 
   const guess = (value: Guess) => {
     setLocal({ readId: round.read.id, guess: value });

@@ -24,7 +24,8 @@ export function ActionButton({ tone, selected = false, big = false, className, c
       {...rest}
       className={cx(
         "wide relative w-full rounded-2xl font-extrabold transition-transform duration-100 active:translate-y-0.5",
-        "disabled:opacity-45 disabled:active:translate-y-0",
+        "disabled:bg-field-deep disabled:text-field-soft disabled:shadow-none disabled:active:translate-y-0",
+        "disabled:outline-2 disabled:outline-dashed disabled:-outline-offset-2 disabled:outline-field-soft/60",
         big ? "min-h-24 px-4 text-[clamp(1.4rem,6vw,2rem)]" : "min-h-14 px-5 text-lg",
         "shadow-[0_5px_0_0_var(--color-field-deep)] active:shadow-[0_2px_0_0_var(--color-field-deep)]",
         selected && "outline-[5px] outline-offset-[3px] outline-white outline-solid",

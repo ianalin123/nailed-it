@@ -39,7 +39,7 @@ export function StartForm() {
     if (!saved.ok) {
       setErrors({ storage: saved.reason });
     }
-    router.push(`/room/${roomCode}`);
+    router.push(intent === "create" ? `/room/${roomCode}?create=1` : `/room/${roomCode}`);
   };
 
   return (
@@ -47,7 +47,7 @@ export function StartForm() {
       <form onSubmit={go("create")} className="flex flex-col gap-4">
         <NicknameField value={nickname} onChange={setNickname} error={errors.nickname} />
         <ActionButton tone="nailed" big type="submit">
-          Start a room
+          Create a room
         </ActionButton>
       </form>
       <form onSubmit={go("join")} className="flex flex-col gap-2" noValidate>

@@ -5,11 +5,14 @@ export type ConnectionState = "connecting" | "open" | "reconnecting" | "closed";
 
 export type Notice = { id: number; title: string; detail: string };
 
+export type JoinFailure = { code: "room_not_found" | "room_exists"; message: string };
+
 export type RoomSession = {
   connection: ConnectionState;
   hasConnected: boolean;
   room: RoomState | undefined;
   playerId: string | undefined;
+  joinFailure: JoinFailure | undefined;
   notices: Notice[];
   nextNoticeId: number;
 };
@@ -28,6 +31,7 @@ export const initialSession = (playerId?: string): RoomSession => ({
   hasConnected: false,
   room: undefined,
   playerId,
+  joinFailure: undefined,
   notices: [],
   nextNoticeId: 1,
 });
@@ -42,7 +46,14 @@ export const SERVER_ERROR_TITLE: Record<ErrorCode, string> = {
   not_enough_decks: "Not enough decks yet",
   unknown_read: "That card is no longer in play",
   bad_token: "Couldn't reclaim your seat",
+  room_not_found: "There's no room with that code",
+  room_exists: "That room code is already taken",
+  not_joined: "You're not in this room yet",
+  hot_seat_cannot_guess: "You can't guess on your own card",
+  stage_cannot_act: "The big screen only watches",
 };
+
+const JOIN_FAILURES = new Set<ErrorCode>(["room_not_found", "room_exists"]);
 
 const connectionFor = (status: SocketStatus, hasConnected: boolean): ConnectionState => {
   if (status === "open") return "open";
@@ -65,10 +76,14 @@ const pushNotice = (session: RoomSession, title: string, detail: string): RoomSe
 const applyServerMessage = (session: RoomSession, message: ServerMessage): RoomSession => {
   switch (message.type) {
     case "welcome":
-      return { ...session, playerId: message.playerId, room: message.state };
+      return { ...session, playerId: message.playerId, room: message.state, joinFailure: undefined };
     case "state":
       return { ...session, room: message.state };
     case "error":
+      if (JOIN_FAILURES.has(message.code) && !session.room) {
+        const code = message.code === "room_exists" ? "room_exists" : "room_not_found";
+        return { ...session, joinFailure: { code, message: message.message } };
+      }
       return pushNotice(session, SERVER_ERROR_TITLE[message.code], message.message);
   }
 };

@@ -17,8 +17,17 @@ No server yet? Play against simulated players in the browser:
 pnpm --filter @nailed-it/web dev:mock
 ```
 
-The mock makes you host, adds Juno, Ravi and Moss (Moss never submits a deck), and has the bots guess
-and reveal on timers, so every screen is reachable from one tab.
+In the mock, "Create a room" makes you host and adds Juno, Ravi and Moss (Moss never submits a deck).
+Joining any other code drops you into a running room hosted by a bot, which starts and advances on
+its own. Codes starting with X never exist (tests "no room"), codes starting with Y are always taken
+(tests the create retry). The stage view in mock mode watches a bot-hosted game play itself.
+
+## Screens
+
+- `/` create a room or join one
+- `/room/CODE` the phone view for players
+- `/room/CODE/stage` the big screen for a TV or projector. Display only, joins with `role: "stage"`,
+  never sees a token. The host's lobby links to it.
 
 ## Env
 
@@ -33,7 +42,8 @@ and reveal on timers, so every screen is reachable from one tab.
 - `src/lib/game/` pure rules for the UI: selectors (who can guess, why Start is disabled), room codes, demo deck
 - `src/lib/room/` connection layer: `RoomTransport` interface, PartyKit and mock transports, message decoding, session reducer, `useRoom`
 - `src/lib/room/mock/` in-browser game engine used by the mock transport
-- `src/components/room/` one view per screen, picked by `screenFor(state)`
+- `src/components/room/` one phone view per screen, picked by `screenFor(state)`
+- `src/components/stage/` the landscape big-screen views
 
 ## Checks
 

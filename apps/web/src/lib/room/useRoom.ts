@@ -5,6 +5,7 @@ import type { ClientMessage } from "@nailed-it/protocol";
 import { readRoomEnv, resolveRoomConfig } from "./config";
 import { createTransport, type TransportChoice } from "./createTransport";
 import { clearSeat, loadSeat, saveSeat, type SeatIdentity } from "./identity";
+import { joinMessageFor, shouldStoreSeat, type JoinPlan } from "./joinPlan";
 import { decodeServerMessage } from "./messages";
 import { initialSession, sessionReducer, type RoomSession } from "./session";
 import type { RoomTransport, TransportEvent } from "./transport";
@@ -19,20 +20,20 @@ export type UseRoomResult = {
   dismissNotice: (id: number) => void;
 };
 
-export const joinMessage = (nickname: string, seat: SeatIdentity | undefined): ClientMessage => {
-  if (!seat) return { type: "join", nickname };
-  return seat.token === undefined
-    ? { type: "join", nickname, playerId: seat.playerId }
-    : { type: "join", nickname, playerId: seat.playerId, token: seat.token };
-};
 
 const IDENTITY_TITLE = "This device can't remember you";
 
+const planFrom = (role: JoinPlan["role"], nickname: string, create: boolean): JoinPlan =>
+  role === "stage" ? { role } : { role, nickname, create };
+
 export const useRoom = (
   code: string,
-  nickname: string,
+  plan: JoinPlan,
   openTransport: OpenTransport = defaultOpenTransport,
 ): UseRoomResult => {
+  const role = plan.role;
+  const nickname = plan.role === "player" ? plan.nickname : "";
+  const create = plan.role === "player" && plan.create;
   const [session, dispatch] = useReducer(sessionReducer, undefined, () => initialSession());
   const transportRef = useRef<RoomTransport | undefined>(undefined);
 
@@ -42,6 +43,11 @@ export const useRoom = (
   );
 
   useEffect(() => {
+    let joinPlan = planFrom(role, nickname, create);
+    const storesSeat = shouldStoreSeat(joinPlan);
+    const stopCreating = (): void => {
+      if (joinPlan.role === "player") joinPlan = { ...joinPlan, create: false };
+    };
     const choice = openTransport(code);
     if (!choice.ok) {
       dispatch({ type: "socket_status", status: "closed" });
@@ -56,12 +62,16 @@ export const useRoom = (
 
     const sendJoin = (seat: SeatIdentity | undefined): void => {
       lastSeat = seat;
-      const result = transport.send(joinMessage(nickname, seat));
+      const result = transport.send(joinMessageFor(joinPlan, seat));
       if (!result.ok) notice("Couldn't join the room", result.reason);
     };
 
     const joinWithStoredSeat = (): void => {
       retriedFresh = false;
+      if (!storesSeat) {
+        sendJoin(undefined);
+        return;
+      }
       const stored = loadSeat(code);
       if (!stored.ok) notice(IDENTITY_TITLE, stored.reason);
       sendJoin(stored.ok ? stored.value : undefined);
@@ -76,6 +86,7 @@ export const useRoom = (
     const joinFreshAfterBadToken = (): void => {
       if (retriedFresh || lastSeat === undefined) return;
       retriedFresh = true;
+      stopCreating();
       const cleared = clearSeat(code);
       if (!cleared.ok) notice(IDENTITY_TITLE, cleared.reason);
       sendJoin(undefined);
@@ -93,7 +104,10 @@ export const useRoom = (
         return;
       }
       const message = decoded.message;
-      if (message.type === "welcome") rememberSeat(message.playerId, message.reconnectToken);
+      if (message.type === "welcome") {
+        stopCreating();
+        if (storesSeat) rememberSeat(message.playerId, message.reconnectToken);
+      }
       dispatch({ type: "server_message", message });
       if (message.type === "error" && message.code === "bad_token") joinFreshAfterBadToken();
     };
@@ -104,7 +118,7 @@ export const useRoom = (
       transport.close();
       transportRef.current = undefined;
     };
-  }, [code, nickname, openTransport, notice]);
+  }, [code, role, nickname, create, openTransport, notice]);
 
   const send = useCallback(
     (message: ClientMessage) => {

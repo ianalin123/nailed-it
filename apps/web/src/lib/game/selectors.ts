@@ -1,4 +1,5 @@
 import {
+  MIN_DECKS,
   MIN_PLAYERS,
   type Guess,
   type Player,
@@ -7,7 +8,6 @@ import {
   type Truth,
 } from "@nailed-it/protocol";
 
-export const MIN_DECKS = 2;
 export const CARDS_PER_PLAYER_MIN = 1;
 export const CARDS_PER_PLAYER_MAX = 10;
 export const CARDS_PER_PLAYER_DEFAULT = 3;
@@ -55,16 +55,28 @@ export const startStatus = (state: RoomState, viewerId: string | undefined): Sta
   }
   const decks = deckCount(state);
   if (decks < MIN_DECKS) {
-    return {
-      canStart: false,
-      reason: `Needs at least ${MIN_DECKS} decks. ${decks === 0 ? "None" : decks} in so far.`,
-    };
+    const needed = MIN_DECKS === 1 ? "one player" : `${MIN_DECKS} players`;
+    const soFar = decks === 0 ? "None in yet." : `${decks} in so far.`;
+    return { canStart: false, reason: `Needs a deck from at least ${needed}. ${soFar}` };
   }
   return { canStart: true };
 };
 
-export const clampCardsPerPlayer = (value: number): number =>
-  Math.min(CARDS_PER_PLAYER_MAX, Math.max(CARDS_PER_PLAYER_MIN, Math.round(value)));
+export const cardsPerPlayerLimit = (state: RoomState): number => {
+  const sizes = state.players
+    .filter((player) => player.hasDeck && player.deckSize !== undefined)
+    .map((player) => player.deckSize ?? CARDS_PER_PLAYER_MAX);
+  const smallest = sizes.length === 0 ? CARDS_PER_PLAYER_MAX : Math.min(...sizes);
+  return Math.max(CARDS_PER_PLAYER_MIN, Math.min(CARDS_PER_PLAYER_MAX, smallest));
+};
+
+export const clampCardsPerPlayer = (value: number, max: number = CARDS_PER_PLAYER_MAX): number =>
+  Math.min(max, CARDS_PER_PLAYER_MAX, Math.max(CARDS_PER_PLAYER_MIN, Math.round(value)));
+
+export type LocalGuess = { readId: string; guess: Guess };
+
+export const viewerGuess = (round: Round, local: LocalGuess | undefined): Guess | undefined =>
+  local?.readId === round.read.id ? local.guess : round.yourGuess;
 
 export type ViewerRole = "hot_seat" | "guesser" | "spectator";
 

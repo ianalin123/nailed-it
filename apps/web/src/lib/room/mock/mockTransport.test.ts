@@ -2,7 +2,7 @@ import type { RoomState, ServerMessage } from "@nailed-it/protocol";
 import { buildDemoDeck } from "@/lib/game/demoDeck";
 import { decodeServerMessage } from "../messages";
 import type { RoomTransport, TransportEvent } from "../transport";
-import { createMockTransport, DEFAULT_BOTS } from "./mockTransport";
+import { createMockTransport, DEFAULT_BOTS, mockScenarioFor } from "./mockTransport";
 
 const collect = (transport: RoomTransport) => {
   const messages: ServerMessage[] = [];
@@ -40,9 +40,10 @@ describe("mock transport", () => {
     vi.advanceTimersByTime(500);
     expect(feed.statuses).toEqual(["connecting", "open"]);
 
-    transport.send({ type: "join", nickname: "Ada" });
+    transport.send({ type: "join", nickname: "Ada", create: true });
     vi.advanceTimersByTime(1);
     const welcome = feed.messages[0];
+    expect(welcome?.type === "welcome" && welcome.reconnectToken).toBeTruthy();
     expect(welcome?.type).toBe("welcome");
     const me = welcome?.type === "welcome" ? welcome.playerId : "";
 
@@ -78,11 +79,49 @@ describe("mock transport", () => {
     transport.close();
   });
 
+  it("plays a whole bot-hosted game on its own for a stage", () => {
+    const transport = createMockTransport({ room: "KQRT" });
+    const feed = collect(transport);
+    vi.advanceTimersByTime(500);
+    transport.send({ type: "join", nickname: "Stage", role: "stage" });
+    vi.advanceTimersByTime(1);
+    expect(feed.messages[0]).toMatchObject({ type: "welcome" });
+    expect(feed.messages[0]?.type === "welcome" && feed.messages[0].reconnectToken).toBeUndefined();
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(feed.latest()?.status).toBe("finished");
+    const sawChain = feed.messages.some((message) => message.type !== "error" && message.state.round?.chain);
+    expect(sawChain).toBe(true);
+    expect(feed.messages.filter((message) => message.type === "error")).toEqual([]);
+    transport.close();
+  });
+
+  it("refuses to join a missing room and to create a taken one", () => {
+    const missing = createMockTransport({ room: "XQRT" });
+    const missingFeed = collect(missing);
+    const taken = createMockTransport({ room: "YQRT" });
+    const takenFeed = collect(taken);
+    vi.advanceTimersByTime(500);
+    missing.send({ type: "join", nickname: "Ada" });
+    taken.send({ type: "join", nickname: "Ada", create: true });
+    vi.advanceTimersByTime(1);
+    expect(missingFeed.messages[0]).toMatchObject({ type: "error", code: "room_not_found" });
+    expect(takenFeed.messages[0]).toMatchObject({ type: "error", code: "room_exists" });
+    missing.close();
+    taken.close();
+  });
+
+  it("maps codes to scenarios", () => {
+    expect(mockScenarioFor("ABCD", true)).toBe("new");
+    expect(mockScenarioFor("ABCD", false)).toBe("existing");
+    expect(mockScenarioFor("XBCD", false)).toBe("missing");
+    expect(mockScenarioFor("YBCD", true)).toBe("existing");
+  });
+
   it("returns protocol errors for rule violations", () => {
     const transport = createMockTransport({ room: "ABCD", bots: [] });
     const feed = collect(transport);
     vi.advanceTimersByTime(500);
-    transport.send({ type: "join", nickname: "Ada" });
+    transport.send({ type: "join", nickname: "Ada", create: true });
     transport.send({ type: "start", cardsPerPlayer: 3 });
     vi.advanceTimersByTime(1);
     expect(feed.messages.at(-1)).toMatchObject({ type: "error", code: "not_enough_players" });

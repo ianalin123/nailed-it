@@ -1,30 +1,28 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Player } from "@nailed-it/protocol";
 import { buildDemoDeck } from "@/lib/game/demoDeck";
 import {
   CARDS_PER_PLAYER_DEFAULT,
-  CARDS_PER_PLAYER_MAX,
   CARDS_PER_PLAYER_MIN,
+  cardsPerPlayerLimit,
   clampCardsPerPlayer,
   deckCount,
   findPlayer,
   isHost,
   startStatus,
 } from "@/lib/game/selectors";
+import { roomUrls } from "@/lib/game/urls";
 import { ActionButton } from "../ActionButton";
+import { CopyButton } from "../CopyButton";
 import { cx } from "../cx";
+import { useOrigin } from "../useOrigin";
 import { PlayerName } from "./PlayerName";
+import { UploadCode } from "./UploadCode";
 import type { ViewProps } from "./types";
 
 export const pluginCommand = (code: string): string => `/nailed-it:read ${code}`;
-
-const useJoinAddress = (): string | undefined => {
-  const [address, setAddress] = useState<string | undefined>(undefined);
-  useEffect(() => setAddress(window.location.host), []);
-  return address;
-};
 
 function RosterRow({ player, viewerId }: { player: Player; viewerId: string | undefined }) {
   return (
@@ -39,62 +37,49 @@ function RosterRow({ player, viewerId }: { player: Player; viewerId: string | un
           Deck in
         </span>
       ) : (
-        <span className="shrink-0 text-sm text-field-soft">Waiting on deck</span>
+        <span className="shrink-0 text-sm text-field-soft">No deck</span>
       )}
     </li>
   );
 }
 
-type CopyState = { kind: "idle" } | { kind: "copied" } | { kind: "failed"; reason: string };
-
-function CommandToCopy({ command }: { command: string }) {
-  const [copy, setCopy] = useState<CopyState>({ kind: "idle" });
-  const copyCommand = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopy({ kind: "copied" });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      setCopy({ kind: "failed", reason });
-    }
-  };
+function CommandLine({ command }: { command: string }) {
   return (
-    <div>
-      <div className="flex items-stretch overflow-hidden rounded-xl bg-ink">
-        <code className="min-w-0 flex-1 overflow-x-auto px-4 py-3 font-machine text-lg whitespace-nowrap text-slip">
-          {command}
-        </code>
-        <button type="button" onClick={copyCommand} className="shrink-0 bg-slip px-4 font-bold text-ink">
-          {copy.kind === "copied" ? "Copied" : "Copy"}
-        </button>
-      </div>
-      {copy.kind === "failed" ? (
-        <p role="alert" className="mt-2 text-sm text-alarm">
-          Couldn&apos;t copy ({copy.reason}). Select the command and copy it by hand.
-        </p>
-      ) : null}
+    <div className="flex flex-wrap items-stretch overflow-hidden rounded-xl bg-ink">
+      <code className="min-w-0 flex-1 overflow-x-auto px-4 py-3 font-machine text-lg whitespace-nowrap text-slip">
+        {command}
+      </code>
+      <CopyButton value={command} label="Copy command" className="shrink-0 bg-slip px-4 font-bold text-ink" />
     </div>
   );
 }
 
-function DeckPanel({ code, hasDeck, onDemo }: { code: string; hasDeck: boolean; onDemo: () => void }) {
-  if (hasDeck) {
+type DeckPanelProps = { code: string; viewer: Player; onDemo: () => void };
+
+function DeckPanel({ code, viewer, onDemo }: DeckPanelProps) {
+  if (viewer.hasDeck) {
     return (
       <section className="rounded-2xl bg-field-deep p-5">
         <h2 className="wide text-2xl font-extrabold">Your deck is in</h2>
-        <p className="mt-1 text-field-soft">The reader has its guesses about you. Nobody sees them until the game starts.</p>
+        <p className="mt-1 text-field-soft">
+          {viewer.deckSize === undefined ? "The reader" : `${viewer.deckSize} reads. The reader`} has its guesses about
+          you. Nobody sees them until the game starts.
+        </p>
       </section>
     );
   }
   return (
-    <section className="rounded-2xl bg-field-deep p-5">
-      <h2 className="wide text-2xl font-extrabold">Get read</h2>
-      <p className="mt-1 mb-4 max-w-prose text-field-soft">
-        Run this in Claude Code on your own computer. The reader looks at your files there, you approve what it
-        uses, and only its reads come to this room.
-      </p>
-      <CommandToCopy command={pluginCommand(code)} />
-      <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center">
+    <section className="flex flex-col gap-4 rounded-2xl bg-field-deep p-5">
+      <div>
+        <h2 className="wide text-2xl font-extrabold">Get read</h2>
+        <p className="mt-1 max-w-prose text-field-soft">
+          Run this in Claude Code on your own computer. The reader looks at your files there, you approve what it
+          uses, and only its reads come to this room. It will ask for your upload code.
+        </p>
+      </div>
+      <CommandLine command={pluginCommand(code)} />
+      <UploadCode code={code} playerId={viewer.id} />
+      <div className="flex flex-col gap-2 border-t-2 border-field-soft/20 pt-4 sm:flex-row sm:items-center">
         <ActionButton tone="quiet" onClick={onDemo} className="border-2 border-field-soft/40 sm:w-auto">
           Use demo deck
         </ActionButton>
@@ -104,9 +89,30 @@ function DeckPanel({ code, hasDeck, onDemo }: { code: string; hasDeck: boolean; 
   );
 }
 
-function HostControls({ canStart, reason, onStart }: { canStart: boolean; reason: string | undefined; onStart: (cards: number) => void }) {
-  const [cards, setCards] = useState(CARDS_PER_PLAYER_DEFAULT);
-  const step = (delta: number) => setCards((value) => clampCardsPerPlayer(value + delta));
+function StageLink({ code }: { code: string }) {
+  const origin = useOrigin();
+  if (!origin) return null;
+  const { stage } = roomUrls(origin, code);
+  return (
+    <section className="flex flex-col gap-2 rounded-2xl border-2 border-dashed border-field-soft/40 p-4">
+      <h2 className="text-lg font-bold">Put the game on a big screen</h2>
+      <p className="text-sm text-field-soft">Open this on a laptop plugged into the TV. You keep running the game from here.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <a href={stage} target="_blank" rel="noreferrer" className="min-w-0 flex-1 font-machine break-all underline underline-offset-4">
+          {stage}
+        </a>
+        <CopyButton value={stage} label="Copy big screen link" className="rounded-md bg-slip px-3 py-1 text-sm font-bold text-ink" />
+      </div>
+    </section>
+  );
+}
+
+type HostControlsProps = { limit: number; canStart: boolean; reason: string | undefined; onStart: (cards: number) => void };
+
+function HostControls({ limit, canStart, reason, onStart }: HostControlsProps) {
+  const [wanted, setWanted] = useState(CARDS_PER_PLAYER_DEFAULT);
+  const cards = clampCardsPerPlayer(wanted, limit);
+  const step = (delta: number) => setWanted(clampCardsPerPlayer(cards + delta, limit));
   return (
     <section className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-4">
@@ -129,7 +135,7 @@ function HostControls({ canStart, reason, onStart }: { canStart: boolean; reason
           <button
             type="button"
             aria-label="More cards"
-            disabled={cards >= CARDS_PER_PLAYER_MAX}
+            disabled={cards >= limit}
             onClick={() => step(1)}
             className="size-11 rounded-lg text-2xl font-bold disabled:opacity-35"
           >
@@ -141,7 +147,7 @@ function HostControls({ canStart, reason, onStart }: { canStart: boolean; reason
         Start the game
       </ActionButton>
       {reason ? (
-        <p id="start-reason" className="text-center text-field-soft">
+        <p id="start-reason" className="text-center text-lg text-white">
           {reason}
         </p>
       ) : null}
@@ -154,14 +160,17 @@ export function LobbyView({ room, viewerId, send }: ViewProps) {
   const status = startStatus(room, viewerId);
   const reason = status.canStart ? undefined : status.reason;
   const decks = deckCount(room);
-  const joinAddress = useJoinAddress();
+  const origin = useOrigin();
+  const host = isHost(room, viewerId);
   return (
     <div className="flex flex-col gap-8">
       <section>
         <p className="text-field-soft">
-          {joinAddress ? `Friends go to ${joinAddress} and enter` : "Friends join with this code"}
+          {origin ? `Friends go to ${roomUrls(origin, room.code).display} and enter` : "Friends join with this code"}
         </p>
-        <p className="wide mt-1 font-black tracking-[0.12em] text-[clamp(4.5rem,24vw,9rem)] leading-[0.9]">{room.code}</p>
+        <p className="wide mt-1 font-black whitespace-nowrap tracking-[0.06em] text-[min(16vw,9rem)] leading-[0.9]">
+          {room.code}
+        </p>
       </section>
 
       <section>
@@ -179,15 +188,12 @@ export function LobbyView({ room, viewerId, send }: ViewProps) {
       </section>
 
       {viewer ? (
-        <DeckPanel
-          code={room.code}
-          hasDeck={viewer.hasDeck}
-          onDemo={() => send({ type: "submit_deck", deck: buildDemoDeck() })}
-        />
+        <DeckPanel code={room.code} viewer={viewer} onDemo={() => send({ type: "submit_deck", deck: buildDemoDeck() })} />
       ) : null}
 
-      {isHost(room, viewerId) ? (
+      {host ? (
         <HostControls
+          limit={cardsPerPlayerLimit(room)}
           canStart={status.canStart}
           reason={reason}
           onStart={(cardsPerPlayer) => send({ type: "start", cardsPerPlayer })}
@@ -195,6 +201,8 @@ export function LobbyView({ room, viewerId, send }: ViewProps) {
       ) : (
         <p className="text-center text-lg text-field-soft">{reason}</p>
       )}
+
+      {host ? <StageLink code={room.code} /> : null}
     </div>
   );
 }

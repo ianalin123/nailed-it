@@ -1,5 +1,6 @@
 import {
   MAX_PLAYERS,
+  MIN_DECKS,
   MIN_PLAYERS,
   PROTOCOL_VERSION,
   type ClientMessage,
@@ -13,7 +14,6 @@ import {
   type Truth,
 } from "@nailed-it/protocol";
 
-const MIN_DECKS = 2;
 const CORRECT_POINTS = 100;
 const PARTLY_POINTS = 50;
 const STREAK_STEP = 25;
@@ -31,6 +31,8 @@ type ActiveRound = {
 
 export type MockGame = {
   code: string;
+  created: boolean;
+  stageIds: string[];
   status: RoomStatus;
   players: Player[];
   decks: Record<string, Deck>;
@@ -43,11 +45,13 @@ export type MockGame = {
 export type MockError = { code: ErrorCode; message: string };
 
 export type MockOutcome =
-  | { ok: true; game: MockGame; joined?: { playerId: string; token: string } }
+  | { ok: true; game: MockGame; joined?: { playerId: string; token: string | undefined } }
   | { ok: false; error: MockError };
 
-export const createMockGame = (code: string): MockGame => ({
+export const createMockGame = (code: string, created = false): MockGame => ({
   code,
+  created,
+  stageIds: [],
   status: "lobby",
   players: [],
   decks: {},
@@ -68,6 +72,23 @@ export const setConnected = (game: MockGame, playerId: string, connected: boolea
   updatePlayer(game, playerId, { connected });
 
 const join = (
+  game: MockGame,
+  message: Extract<ClientMessage, { type: "join" }>,
+  newId: () => string,
+): MockOutcome => {
+  if (message.create === true) {
+    if (game.created) return fail("room_exists", `Room ${game.code} already exists. Pick another code.`);
+    return joinAsPlayer({ ...game, created: true }, message, newId);
+  }
+  if (!game.created) return fail("room_not_found", `There's no room ${game.code}. Check the code on the host's screen.`);
+  if (message.role === "stage") {
+    const stageId = `stage-${newId()}`;
+    return { ok: true, game: { ...game, stageIds: [...game.stageIds, stageId] }, joined: { playerId: stageId, token: undefined } };
+  }
+  return joinAsPlayer(game, message, newId);
+};
+
+const joinAsPlayer = (
   game: MockGame,
   message: Extract<ClientMessage, { type: "join" }>,
   newId: () => string,
@@ -136,7 +157,7 @@ const guess = (game: MockGame, actorId: string, readId: string, value: Guess): M
     return fail("wrong_phase", "Guessing is closed for this card.");
   }
   if (round.card.read.id !== readId) return fail("unknown_read", "That card is no longer in play.");
-  if (round.card.hotSeatId === actorId) return fail("invalid_message", "You can't guess on your own card.");
+  if (round.card.hotSeatId === actorId) return fail("hot_seat_cannot_guess", "You can't guess on your own card.");
   return { ok: true, game: { ...game, round: { ...round, guesses: { ...round.guesses, [actorId]: value } } } };
 };
 
@@ -186,12 +207,13 @@ export const applyMessage = (
   newId: () => string,
 ): MockOutcome => {
   if (message.type === "join") return join(game, message, newId);
-  if (!actorId) return fail("invalid_message", "Join the room first.");
+  if (!actorId) return fail("not_joined", "Join the room first.");
+  if (game.stageIds.includes(actorId)) return fail("stage_cannot_act", "The big screen only watches.");
   switch (message.type) {
     case "submit_deck": {
       if (game.status !== "lobby") return fail("wrong_phase", "Decks can only be submitted in the lobby.");
       const withDeck = { ...game, decks: { ...game.decks, [actorId]: message.deck } };
-      return { ok: true, game: updatePlayer(withDeck, actorId, { hasDeck: true }) };
+      return { ok: true, game: updatePlayer(withDeck, actorId, { hasDeck: true, deckSize: message.deck.reads.length }) };
     }
     case "start":
       return start(game, actorId, message.cardsPerPlayer);
@@ -209,7 +231,7 @@ const TRUTH_SCORE: Record<Truth, number> = { nailed: 1, partly: 0.5, off: 0 };
 export const readerAccuracy = (truths: readonly Truth[]): number | undefined =>
   truths.length === 0 ? undefined : truths.reduce((sum, truth) => sum + TRUTH_SCORE[truth], 0) / truths.length;
 
-export const toRoomState = (game: MockGame): RoomState => {
+export const toRoomState = (game: MockGame, viewerId?: string): RoomState => {
   const accuracy = readerAccuracy(game.truths);
   const round = game.round;
   const base: RoomState = {
@@ -221,6 +243,8 @@ export const toRoomState = (game: MockGame): RoomState => {
   };
   if (!round || game.status !== "playing") return base;
   const revealed = round.truth !== undefined;
+  const yourGuess = viewerId === undefined ? undefined : round.guesses[viewerId];
+  const chain = round.card.read.chain;
   return {
     ...base,
     round: {
@@ -230,6 +254,8 @@ export const toRoomState = (game: MockGame): RoomState => {
       read: { id: round.card.read.id, text: round.card.read.text, category: round.card.read.category },
       phase: revealed ? "reveal" : "voting",
       votedPlayerIds: Object.keys(round.guesses),
+      ...(yourGuess === undefined ? {} : { yourGuess }),
+      ...(revealed && chain && chain.length > 0 ? { chain } : {}),
       ...(revealed && round.truth !== undefined
         ? {
             truth: round.truth,

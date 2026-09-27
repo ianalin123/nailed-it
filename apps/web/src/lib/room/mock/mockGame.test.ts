@@ -19,7 +19,7 @@ const must = (game: MockGame, actor: string | undefined, message: ClientMessage,
 const lobbyWithTwoDecks = (): MockGame => {
   const newId = ids();
   let game = createMockGame("ABCD");
-  game = must(game, undefined, { type: "join", nickname: "Ada" }, newId);
+  game = must(game, undefined, { type: "join", nickname: "Ada", create: true }, newId);
   game = must(game, undefined, { type: "join", nickname: "Bo" }, newId);
   game = must(game, undefined, { type: "join", nickname: "Cy" }, newId);
   game = must(game, "p1", { type: "submit_deck", deck: buildDemoDeck("a") });
@@ -42,14 +42,51 @@ describe("mock game engine", () => {
     expect(outcome).toMatchObject({ ok: false, error: { code: "bad_token" } });
   });
 
+  it("creates rooms once and refuses to join rooms that don't exist", () => {
+    const fresh = createMockGame("ABCD");
+    expect(applyMessage(fresh, undefined, { type: "join", nickname: "Ada" }, ids())).toMatchObject({
+      ok: false,
+      error: { code: "room_not_found" },
+    });
+    const created = must(fresh, undefined, { type: "join", nickname: "Ada", create: true });
+    expect(applyMessage(created, undefined, { type: "join", nickname: "Bo", create: true }, ids())).toMatchObject({
+      ok: false,
+      error: { code: "room_exists" },
+    });
+  });
+
+  it("lets a stage watch without becoming a player or acting", () => {
+    const game = lobbyWithTwoDecks();
+    const outcome = applyMessage(game, undefined, { type: "join", nickname: "Stage", role: "stage" }, ids());
+    if (!outcome.ok || !outcome.joined) throw new Error("stage join failed");
+    expect(outcome.joined.token).toBeUndefined();
+    expect(outcome.game.players).toHaveLength(3);
+    expect(applyMessage(outcome.game, outcome.joined.playerId, { type: "start", cardsPerPlayer: 1 }, ids())).toMatchObject({
+      ok: false,
+      error: { code: "stage_cannot_act" },
+    });
+  });
+
+  it("reports deck sizes", () => {
+    expect(toRoomState(lobbyWithTwoDecks()).players.map((player) => player.deckSize)).toEqual([12, 12, undefined]);
+  });
+
+  it("allows starting with a single deck", () => {
+    let game = createMockGame("ABCD");
+    game = must(game, undefined, { type: "join", nickname: "Ada", create: true });
+    game = must(game, undefined, { type: "join", nickname: "Bo" }, () => "p2");
+    game = must(game, "p2", { type: "submit_deck", deck: buildDemoDeck("b") });
+    expect(must(game, "p1", { type: "start", cardsPerPlayer: 2 }).status).toBe("playing");
+  });
+
   it("enforces start rules", () => {
     const game = lobbyWithTwoDecks();
     expect(applyMessage(game, "p2", { type: "start", cardsPerPlayer: 2 }, ids())).toMatchObject({
       ok: false,
       error: { code: "not_host" },
     });
-    const oneDeck = { ...game, decks: {}, players: game.players.map((player) => ({ ...player, hasDeck: false })) };
-    expect(applyMessage(oneDeck, "p1", { type: "start", cardsPerPlayer: 2 }, ids())).toMatchObject({
+    const noDecks = { ...game, decks: {}, players: game.players.map((player) => ({ ...player, hasDeck: false })) };
+    expect(applyMessage(noDecks, "p1", { type: "start", cardsPerPlayer: 2 }, ids())).toMatchObject({
       ok: false,
       error: { code: "not_enough_decks" },
     });
@@ -71,6 +108,9 @@ describe("mock game engine", () => {
     const voting = toRoomState(game).round;
     expect(voting?.votedPlayerIds).toEqual(["p2", "p3"]);
     expect(voting?.guesses).toBeUndefined();
+    expect(voting?.yourGuess).toBeUndefined();
+    expect(toRoomState(game, "p3").round?.yourGuess).toBe("nailed");
+    expect(voting?.chain).toBeUndefined();
 
     game = must(game, "p1", { type: "reveal", readId, truth: "nailed" });
     const revealed = toRoomState(game).round;
@@ -78,12 +118,16 @@ describe("mock game engine", () => {
     expect(revealed?.guesses).toEqual({ p2: "nailed", p3: "nailed" });
     expect(revealed?.pointsAwarded).toEqual({ p2: 100, p3: 100 });
     expect(revealed?.readerConfidence).toBeGreaterThan(0);
+    expect(revealed?.chain?.[0]?.kind).toBe("evidence");
   });
 
   it("blocks the hot seat from guessing and others from revealing", () => {
     const game = must(lobbyWithTwoDecks(), "p1", { type: "start", cardsPerPlayer: 1 });
     const readId = game.round?.card.read.id ?? "";
-    expect(applyMessage(game, "p1", { type: "guess", readId, guess: "off" }, ids()).ok).toBe(false);
+    expect(applyMessage(game, "p1", { type: "guess", readId, guess: "off" }, ids())).toMatchObject({
+      ok: false,
+      error: { code: "hot_seat_cannot_guess" },
+    });
     expect(applyMessage(game, "p2", { type: "reveal", readId, truth: "off" }, ids())).toMatchObject({
       ok: false,
       error: { code: "not_hot_seat" },

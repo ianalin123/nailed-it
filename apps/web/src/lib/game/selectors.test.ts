@@ -3,6 +3,7 @@ import {
   canAdvance,
   canGuess,
   canReveal,
+  cardsPerPlayerLimit,
   clampCardsPerPlayer,
   confidenceLine,
   guessOutcome,
@@ -11,6 +12,7 @@ import {
   revealSummary,
   screenFor,
   startStatus,
+  viewerGuess,
   viewerRole,
   voteProgress,
 } from "./selectors";
@@ -42,21 +44,24 @@ describe("startStatus", () => {
     });
   });
 
-  it("explains missing decks", () => {
+  it("allows starting with a single deck", () => {
     const state = makeState({
       players: [
         makePlayer({ id: "a", nickname: "Ada", isHost: true }),
         makePlayer({ id: "b", nickname: "Bo", hasDeck: true }),
       ],
     });
-    expect(startStatus(state, "a")).toEqual({ canStart: false, reason: "Needs at least 2 decks. 1 in so far." });
+    expect(startStatus(state, "a")).toEqual({ canStart: true });
   });
 
-  it("says none when nobody has a deck", () => {
+  it("explains that nobody has a deck yet", () => {
     const state = makeState({
       players: [makePlayer({ id: "a", isHost: true }), makePlayer({ id: "b" })],
     });
-    expect(startStatus(state, "a")).toMatchObject({ reason: "Needs at least 2 decks. None in so far." });
+    expect(startStatus(state, "a")).toEqual({
+      canStart: false,
+      reason: "Needs a deck from at least one player. None in yet.",
+    });
   });
 
   it("refuses once the game is running", () => {
@@ -174,10 +179,49 @@ describe("formatting", () => {
     expect(clampCardsPerPlayer(0)).toBe(1);
     expect(clampCardsPerPlayer(11)).toBe(10);
     expect(clampCardsPerPlayer(3)).toBe(3);
+    expect(clampCardsPerPlayer(8, 5)).toBe(5);
   });
 
   it("makes possessives", () => {
     expect(possessive("Bo")).toBe("Bo's");
     expect(possessive("Moss")).toBe("Moss'");
+  });
+});
+
+describe("cardsPerPlayerLimit", () => {
+  it("is the smallest submitted deck", () => {
+    const state = makeState({
+      players: [
+        makePlayer({ id: "a", hasDeck: true, deckSize: 12 }),
+        makePlayer({ id: "b", hasDeck: true, deckSize: 4 }),
+        makePlayer({ id: "c", hasDeck: false, deckSize: 0 }),
+      ],
+    });
+    expect(cardsPerPlayerLimit(state)).toBe(4);
+  });
+
+  it("never exceeds the protocol maximum", () => {
+    const state = makeState({ players: [makePlayer({ id: "a", hasDeck: true, deckSize: 30 })] });
+    expect(cardsPerPlayerLimit(state)).toBe(10);
+  });
+
+  it("falls back to the protocol maximum when sizes are unknown", () => {
+    expect(cardsPerPlayerLimit(makeState())).toBe(10);
+  });
+});
+
+describe("viewerGuess", () => {
+  const round = makeRound({ read: { id: "r1", text: "t", category: "work_style" }, yourGuess: "off" });
+
+  it("restores the guess from server state after a reload", () => {
+    expect(viewerGuess(round, undefined)).toBe("off");
+  });
+
+  it("prefers a fresh local tap on the same card", () => {
+    expect(viewerGuess(round, { readId: "r1", guess: "nailed" })).toBe("nailed");
+  });
+
+  it("ignores a local guess from an earlier card", () => {
+    expect(viewerGuess(round, { readId: "r0", guess: "nailed" })).toBe("off");
   });
 });
