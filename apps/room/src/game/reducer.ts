@@ -1,4 +1,11 @@
-import { MAX_PLAYERS, MIN_PLAYERS, PROTOCOL_VERSION, type ErrorCode, type VerdictRecord } from "@nailed-it/protocol";
+import {
+  MAX_PLAYERS,
+  MIN_DECKS,
+  MIN_PLAYERS,
+  PROTOCOL_VERSION,
+  type ErrorCode,
+  type VerdictRecord,
+} from "@nailed-it/protocol";
 import { buildSchedule, type DeckHolder } from "./cards";
 import { scoreRound } from "./scoring";
 import type { Effect, GameEvent, InternalPlayer, InternalState, ReduceResult, ScheduledCard } from "./types";
@@ -50,13 +57,21 @@ export const currentCard = (state: InternalState): ScheduledCard | undefined =>
   state.status === "playing" ? state.schedule[state.roundIndex] : undefined;
 
 const unknownPlayer = (playerId: string): ReduceResult =>
-  fail("invalid_message", `Player ${playerId} has not joined this room.`);
+  fail("not_joined", `Player ${playerId} has not joined this room.`);
+
+export const roomExists = (state: InternalState): boolean => state.players.length > 0;
 
 const handleJoin = (state: InternalState, event: EventOf<"join">): ReduceResult => {
   if (findPlayer(state, event.playerId)) {
     return succeed(
       updatePlayer(state, event.playerId, (p) => ({ ...p, connected: true })),
     );
+  }
+  if (event.create && roomExists(state)) {
+    return fail("room_exists", `Room ${state.code} already exists. Pick another code.`);
+  }
+  if (!event.create && !roomExists(state)) {
+    return fail("room_not_found", `Room ${state.code} does not exist.`);
   }
   if (state.players.length >= MAX_PLAYERS) {
     return fail("room_full", `Room ${state.code} already has ${MAX_PLAYERS} players.`);
@@ -86,8 +101,6 @@ const handleSubmitDeck = (state: InternalState, event: EventOf<"submit_deck">): 
 const deckHolders = (state: InternalState): DeckHolder[] =>
   connectedPlayers(state).flatMap((p) => (p.deck ? [{ playerId: p.id, deck: p.deck }] : []));
 
-const MIN_DECKS = 2;
-
 const votingRound = { phase: "voting", guesses: {}, truth: undefined, pointsAwarded: undefined } as const;
 
 const handleStart = (state: InternalState, event: EventOf<"start">): ReduceResult => {
@@ -99,7 +112,14 @@ const handleStart = (state: InternalState, event: EventOf<"start">): ReduceResul
   }
   const holders = deckHolders(state);
   if (holders.length < MIN_DECKS) {
-    return fail("not_enough_decks", `At least ${MIN_DECKS} connected players need a deck to start.`);
+    return fail("not_enough_decks", `At least ${MIN_DECKS} connected player(s) need a deck to start.`);
+  }
+  const smallestDeck = Math.min(...holders.map((h) => h.deck.reads.length));
+  if (event.cardsPerPlayer > smallestDeck) {
+    return fail(
+      "not_enough_decks",
+      `The smallest deck has ${smallestDeck} reads, so cards per player can be at most ${smallestDeck} (asked for ${event.cardsPerPlayer}).`,
+    );
   }
   return succeed({
     ...state,
@@ -127,7 +147,7 @@ const handleGuess = (state: InternalState, event: EventOf<"guess">): ReduceResul
   const context = requireVoting(state, event.readId);
   if (isFailure(context)) return context;
   if (context.card.hotSeatPlayerId === event.playerId) {
-    return fail("invalid_message", "The hot seat cannot guess on their own card.");
+    return fail("hot_seat_cannot_guess", "The hot seat cannot guess on their own card.");
   }
   return succeed({
     ...state,

@@ -6,6 +6,8 @@ import type { GameEvent, InternalState, ReduceResult } from "./types";
 export const ROOM = "ABCD";
 export const NOW = "2026-09-27T12:00:00.000Z";
 
+export const chainTextFor = (readId: string): string => `chain-secret-${readId}`;
+
 export const makeRead = (id: string, confidence: number): Read => ({
   id,
   text: `read ${id}`,
@@ -14,6 +16,10 @@ export const makeRead = (id: string, confidence: number): Read => ({
   evidenceIds: [],
   hops: 2,
   modelVersion: "test-model",
+  chain: [
+    { kind: "evidence", text: `${chainTextFor(id)} evidence` },
+    { kind: "inference", text: `${chainTextFor(id)} inference` },
+  ],
 });
 
 export const makeDeck = (owner: string, confidences: readonly number[] = [0.6, 0.7, 0.5]): Deck => ({
@@ -42,8 +48,15 @@ export const expectError = (result: ReduceResult, code: string): void => {
 export const apply = (state: InternalState, ...events: GameEvent[]): InternalState =>
   events.reduce((s, e) => expectOk(reduce(s, e)).state, state);
 
+export const joinEvent = (playerId: string, create = false): Extract<GameEvent, { type: "join" }> => ({
+  type: "join",
+  playerId,
+  nickname: playerId,
+  create,
+});
+
 export const lobbyWith = (ids: readonly string[], withDecks: readonly string[] = ids): InternalState => {
-  const joined = apply(createRoom(ROOM), ...ids.map((id): GameEvent => ({ type: "join", playerId: id, nickname: id })));
+  const joined = apply(createRoom(ROOM), ...ids.map((id, i) => joinEvent(id, i === 0)));
   return apply(
     joined,
     ...withDecks.map((id): GameEvent => ({ type: "submit_deck", playerId: id, deck: makeDeck(id) })),

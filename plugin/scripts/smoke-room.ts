@@ -1,5 +1,5 @@
-// End-to-end check against a running room server: two players, a plugin deck
-// upload, one full round, and a takeover attempt that must be rejected.
+// End-to-end check against a running room server: room creation, two players, a stage screen,
+// a plugin deck upload, one full round, a takeover attempt that must be rejected, and a one-deck game.
 // Usage: tsx scripts/smoke-room.ts --host localhost:8787
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,7 @@ import {
   parseServerMessage,
   type ClientMessage,
   type Deck,
+  type RoomState,
   type ServerMessage,
 } from "@nailed-it/protocol";
 import { submitDeck } from "./submit-deck";
@@ -91,12 +92,48 @@ const expectType = <T extends ServerMessage["type"]>(message: ServerMessage, typ
   return message as Extract<ServerMessage, { type: T }>;
 };
 
+const checkRoomNotFound = async (): Promise<void> => {
+  const stranger = await connect(randomRoomCode());
+  stranger.send({ type: "join", nickname: "Stranger" });
+  const reply = await stranger.next("welcome");
+  check("joining a never-created room is rejected", reply.type === "error" && reply.code === "room_not_found", reply.type);
+  stranger.close();
+};
+
+const waitForStatus = async (client: Client, status: RoomState["status"]): Promise<RoomState> => {
+  let state = expectType(await client.next("state"), "state").state;
+  while (state.status !== status) state = expectType(await client.next("state"), "state").state;
+  return state;
+};
+
+const checkOneDeckGame = async (): Promise<void> => {
+  const room = randomRoomCode();
+  const solo = await connect(room);
+  solo.send({ type: "join", nickname: "Solo", create: true });
+  const soloWelcome = expectType(await solo.next("welcome"), "welcome");
+  const judge = await connect(room);
+  judge.send({ type: "join", nickname: "Judge" });
+  expectType(await judge.next("welcome"), "welcome");
+  solo.send({ type: "submit_deck", deck: deckFor("solo") });
+  solo.send({ type: "start", cardsPerPlayer: 2 });
+  const state = await waitForStatus(judge, "playing");
+  check(
+    "a one-deck game starts with the deck owner in the hot seat",
+    state.round?.hotSeatPlayerId === soloWelcome.playerId && state.round.total === 2,
+    `hot seat ${state.round?.hotSeatPlayerId ?? "missing"}, total ${state.round?.total ?? 0}`,
+  );
+  solo.close();
+  judge.close();
+};
+
 const run = async (): Promise<void> => {
   const room = randomRoomCode();
   process.stdout.write(`Room ${room} on ${host}\n`);
 
+  await checkRoomNotFound();
+
   const ana = await connect(room);
-  ana.send({ type: "join", nickname: "Ana" });
+  ana.send({ type: "join", nickname: "Ana", create: true });
   const anaWelcome = expectType(await ana.next("welcome"), "welcome");
   check("first joiner is welcomed as host", anaWelcome.state.players[0]?.isHost === true);
   check("welcome carries a reconnect token", typeof anaWelcome.reconnectToken === "string");
@@ -108,6 +145,15 @@ const run = async (): Promise<void> => {
   const boWelcome = expectType(await bo.next("welcome"), "welcome");
   await ana.next("state");
   check("broadcast state never contains a token", !JSON.stringify(boWelcome.state).includes(anaToken));
+
+  const stage = await connect(room);
+  stage.send({ type: "join", nickname: "Stage", role: "stage" });
+  const stageWelcome = expectType(await stage.next("welcome"), "welcome");
+  check(
+    "stage is welcomed without a token and is not a player",
+    stageWelcome.reconnectToken === undefined && stageWelcome.state.players.length === 2,
+    `${stageWelcome.state.players.length} players`,
+  );
 
   const mallory = await connect(room);
   mallory.send({ type: "join", nickname: "Mallory", playerId: anaWelcome.playerId });
@@ -141,7 +187,20 @@ const run = async (): Promise<void> => {
   while (state.status !== "playing") state = expectType(await bo.next("state"), "state").state;
   const round = state.round;
   if (round === undefined) throw new Error("Game started without a round");
-  check("voting phase hides the truth and confidence", round.truth === undefined && round.readerConfidence === undefined);
+  check(
+    "voting phase hides the truth, confidence and chain",
+    round.truth === undefined && round.readerConfidence === undefined && round.chain === undefined,
+  );
+
+  const stageView = await waitForStatus(stage, "playing");
+  check("stage receives state broadcasts", stageView.round?.read.id === round.read.id);
+  stage.send({ type: "guess", readId: round.read.id, guess: "nailed" });
+  const stageGuess = await stage.next("error");
+  check(
+    "stage guessing is rejected with stage_cannot_act",
+    stageGuess.type === "error" && stageGuess.code === "stage_cannot_act",
+    stageGuess.type,
+  );
 
   const hotSeatIsAna = round.hotSeatPlayerId === anaWelcome.playerId;
   const [hotSeat, guesser] = hotSeatIsAna ? [ana, bo] : [bo, ana];
@@ -156,6 +215,9 @@ const run = async (): Promise<void> => {
 
   ana.close();
   bo.close();
+  stage.close();
+
+  await checkOneDeckGame();
 };
 
 try {

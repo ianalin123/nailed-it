@@ -31,10 +31,34 @@ new PartySocket({ host: ROOM_HOST, party: "room", room: "ABCD" });
 
 Protocol (`@nailed-it/protocol`):
 
-1. Send `{ type: "join", nickname }` first. Anything else before a join gets `error` / `invalid_message`.
-2. The server replies with `welcome { playerId, state }`. Store `playerId` (for example in sessionStorage).
-3. To reconnect, send `join` with the stored `playerId`. Score, streak and deck are kept.
+1. **Create or join.** The first message on a connection must be `join`. Anything else gets `error` / `not_joined`.
+   - To create a room, the client picks a random code, connects to it and sends `{ type: "join", nickname, create: true }`.
+     If the room already has (or ever had) a player, the reply is `room_exists`. Pick a new code and retry.
+   - To join an existing room, send `{ type: "join", nickname }`. A room that was never created replies `room_not_found`.
+2. The server replies with `welcome { playerId, reconnectToken, state }`. Store both (for example in sessionStorage).
+   The token is a secret. It appears only in that welcome, never in broadcast state.
+3. To reconnect, send `join` with the stored `playerId` and `token`. Score, streak and deck are kept. `create` is ignored on a
+   rejoin. A missing or wrong token gets `bad_token`.
 4. After every accepted action, each joined connection receives `state`. Rejected actions get an `error` sent only to the sender.
+
+### Stage screens
+
+A big-screen display joins with `{ type: "join", nickname, role: "stage" }`. It:
+
+- gets `welcome` with `playerId: "stage"` and no `reconnectToken`, then every `state` broadcast;
+- is never in `players`, never host, and does not count toward `MIN_PLAYERS` or `MAX_PLAYERS`;
+- cannot create a room (`room_not_found` if the room does not exist yet, even with `create: true`);
+- gets `stage_cannot_act` for any message other than another stage `join`. Any number of stages may watch one room.
+
+### Game rules the server enforces
+
+- `start` (host only) needs `MIN_PLAYERS` connected players and `MIN_DECKS` connected players with a deck. With one deck,
+  that player is in the hot seat every round and everyone else guesses.
+- `cardsPerPlayer` may not exceed the smallest submitted deck (`not_enough_decks`). `players[].deckSize` shows each deck's size.
+- The hot seat cannot guess on their own card (`hot_seat_cannot_guess`).
+- During voting, `round` shows only who voted, plus `yourGuess` for the viewing player. Truth, everyone's guesses, the
+  reader's confidence, the reasoning `chain` and points appear only in the reveal phase. Stages get no `yourGuess`.
+- `invalid_message` is reserved for malformed or off-protocol input.
 
 The web client needs one setting: the room host (for example `NEXT_PUBLIC_ROOM_HOST=localhost:8787`).
 

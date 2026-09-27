@@ -1,12 +1,14 @@
-import { MAX_PLAYERS, MIN_PLAYERS, RoomState, VerdictRecord } from "@nailed-it/protocol";
+import { MAX_PLAYERS, MIN_DECKS, MIN_PLAYERS, RoomState, VerdictRecord } from "@nailed-it/protocol";
 import { describe, expect, it } from "vitest";
 import {
   NOW,
   ROOM,
   apply,
+  chainTextFor,
   expectError,
   expectOk,
   firstRandom,
+  joinEvent,
   lobbyWith,
   makeDeck,
   started,
@@ -63,7 +65,7 @@ describe("join", () => {
   it("rejects joins beyond MAX_PLAYERS with room_full", () => {
     const ids = Array.from({ length: MAX_PLAYERS }, (_, i) => `p${i}`);
     const full = lobbyWith(ids, []);
-    expectError(reduce(full, { type: "join", playerId: "extra", nickname: "extra" }), "room_full");
+    expectError(reduce(full, joinEvent("extra")), "room_full");
   });
 
   it("treats a join with a known playerId as a reconnect, even when the room is full", () => {
@@ -71,7 +73,7 @@ describe("join", () => {
     const full = apply(lobbyWith(ids, []), { type: "disconnect", playerId: "p3" });
     expect(player(full, "p3").connected).toBe(false);
     const originalNickname = player(full, "p3").nickname;
-    const back = expectOk(reduce(full, { type: "join", playerId: "p3", nickname: "renamed" })).state;
+    const back = expectOk(reduce(full, { ...joinEvent("p3"), nickname: "renamed" })).state;
     expect(back.players).toHaveLength(MAX_PLAYERS);
     expect(player(back, "p3")).toMatchObject({ connected: true, nickname: originalNickname });
     expect(originalNickname).not.toBe("renamed");
@@ -79,9 +81,36 @@ describe("join", () => {
 
   it("allows joining mid-game as a guesser", () => {
     const state = started(["a", "b"]);
-    const joined = apply(state, { type: "join", playerId: "c", nickname: "c" });
+    const joined = apply(state, joinEvent("c"));
     const guessed = expectOk(reduce(joined, guess(joined, "c", "nailed"))).state;
     expect(toPublicState(guessed).round?.votedPlayerIds).toContain("c");
+  });
+});
+
+describe("room creation", () => {
+  it("creates the room on a join with create and makes the creator host", () => {
+    const state = expectOk(reduce(createRoom(ROOM), joinEvent("a", true))).state;
+    expect(state.players.map((p) => p.id)).toEqual(["a"]);
+    expect(state.hostId).toBe("a");
+  });
+
+  it("rejects a plain join on a room that was never created with room_not_found", () => {
+    expectError(reduce(createRoom(ROOM), joinEvent("a")), "room_not_found");
+  });
+
+  it("rejects create on a room that already has a player with room_exists", () => {
+    expectError(reduce(lobbyWith(["a"], []), joinEvent("b", true)), "room_exists");
+  });
+
+  it("rejects create on a room whose players have all disconnected", () => {
+    const empty = apply(lobbyWith(["a"], []), { type: "disconnect", playerId: "a" });
+    expectError(reduce(empty, joinEvent("b", true)), "room_exists");
+  });
+
+  it("treats a known player's join as a reconnect even with create set", () => {
+    const away = apply(lobbyWith(["a", "b"], []), { type: "disconnect", playerId: "a" });
+    const back = expectOk(reduce(away, joinEvent("a", true))).state;
+    expect(player(back, "a").connected).toBe(true);
   });
 });
 
@@ -92,14 +121,14 @@ describe("disconnect and reconnect", () => {
     state = apply(state, guess(state, guesser, "nailed"), reveal(state, "nailed"));
     state = apply(state, { type: "disconnect", playerId: guesser });
     expect(player(state, guesser)).toMatchObject({ connected: false, score: 100, streak: 1 });
-    state = apply(state, { type: "join", playerId: guesser, nickname: guesser });
+    state = apply(state, joinEvent(guesser));
     expect(player(state, guesser)).toMatchObject({ connected: true, score: 100, streak: 1 });
   });
 
   it("hands host to the next connected player when the host disconnects", () => {
     const state = apply(lobbyWith(["a", "b", "c"], []), { type: "disconnect", playerId: "a" });
     expect(state.hostId).toBe("b");
-    const back = apply(state, { type: "join", playerId: "a", nickname: "a" });
+    const back = apply(state, joinEvent("a"));
     expect(back.hostId).toBe("b");
   });
 
@@ -109,7 +138,7 @@ describe("disconnect and reconnect", () => {
   });
 
   it("rejects disconnect for an unknown player", () => {
-    expectError(reduce(createRoom(ROOM), { type: "disconnect", playerId: "ghost" }), "invalid_message");
+    expectError(reduce(createRoom(ROOM), { type: "disconnect", playerId: "ghost" }), "not_joined");
   });
 });
 
@@ -137,7 +166,20 @@ describe("submit_deck", () => {
   });
 
   it("rejects decks from players who have not joined", () => {
-    expectError(reduce(createRoom(ROOM), { type: "submit_deck", playerId: "x", deck: makeDeck("x") }), "invalid_message");
+    expectError(reduce(createRoom(ROOM), { type: "submit_deck", playerId: "x", deck: makeDeck("x") }), "not_joined");
+  });
+
+  it("publishes each player's deck size, 0 without a deck", () => {
+    const state = apply(lobbyWith(["a", "b"], []), {
+      type: "submit_deck",
+      playerId: "a",
+      deck: makeDeck("a", [0.5, 0.6, 0.7, 0.8, 0.55]),
+    });
+    const view = toPublicState(state);
+    expect(view.players.map((p) => [p.id, p.deckSize])).toEqual([
+      ["a", 5],
+      ["b", 0],
+    ]);
   });
 });
 
@@ -160,8 +202,29 @@ describe("start", () => {
     expectError(reduce(oneLeft, start("a")), "not_enough_players");
   });
 
-  it("requires at least two players with decks", () => {
-    expectError(reduce(lobbyWith(["a", "b", "c"], ["a"]), start("a")), "not_enough_decks");
+  it("requires MIN_DECKS connected players with decks", () => {
+    expect(MIN_DECKS).toBe(1);
+    expectError(reduce(lobbyWith(["a", "b"], []), start("a")), "not_enough_decks");
+    const deckOwnerGone = apply(lobbyWith(["a", "b"], ["b"]), { type: "disconnect", playerId: "b" });
+    expectError(reduce(apply(deckOwnerGone, joinEvent("c")), start("a")), "not_enough_decks");
+  });
+
+  it("starts with one deck and keeps its owner in the hot seat every round", () => {
+    const state = expectOk(reduce(lobbyWith(["a", "b", "c"], ["b"]), start("a", 3))).state;
+    expect(state.status).toBe("playing");
+    expect(state.schedule.map((c) => c.hotSeatPlayerId)).toEqual(["b", "b", "b"]);
+  });
+
+  it("rejects cardsPerPlayer larger than the smallest submitted deck", () => {
+    const lobby = apply(lobbyWith(["a", "b"], ["a"]), {
+      type: "submit_deck",
+      playerId: "b",
+      deck: makeDeck("b", [0.5, 0.6, 0.7, 0.8, 0.55]),
+    });
+    const result = reduce(lobby, start("a", 4));
+    expectError(result, "not_enough_decks");
+    if (!result.ok) expect(result.error.message).toMatch(/3/);
+    expectOk(reduce(lobby, start("a", 3)));
   });
 
   it("rejects a second start", () => {
@@ -177,7 +240,7 @@ describe("start", () => {
   });
 
   it("rejects commands from unknown players", () => {
-    expectError(reduce(lobbyWith(["a", "b"]), start("ghost")), "invalid_message");
+    expectError(reduce(lobbyWith(["a", "b"]), start("ghost")), "not_joined");
   });
 });
 
@@ -198,7 +261,7 @@ describe("guess", () => {
 
   it("rejects the hot seat guessing their own card", () => {
     const state = started(["a", "b"]);
-    expectError(reduce(state, guess(state, "a", "nailed")), "invalid_message");
+    expectError(reduce(state, guess(state, "a", "nailed")), "hot_seat_cannot_guess");
   });
 
   it("rejects a guess for a read that is not on the table", () => {
@@ -215,7 +278,7 @@ describe("guess", () => {
 
   it("rejects guesses from unknown players", () => {
     const state = started(["a", "b"]);
-    expectError(reduce(state, guess(state, "ghost", "off")), "invalid_message");
+    expectError(reduce(state, guess(state, "ghost", "off")), "not_joined");
   });
 });
 
@@ -284,7 +347,7 @@ describe("scoring", () => {
   });
 
   it("adds 25 per prior consecutive correct guess, capped at 100", () => {
-    let state = started(["a", "b", "c"], 10);
+    let state = started(["a", "b", "c"], 3);
     const earnedByB: number[] = [];
     while (state.status === "playing") {
       if (hotSeat(state) === "a") {
@@ -300,7 +363,7 @@ describe("scoring", () => {
   });
 
   it("caps the streak bonus at 100", () => {
-    let state = started(["a", "b", "c"], 10);
+    let state = started(["a", "b", "c"], 3);
     const earned: number[] = [];
     while (state.status === "playing") {
       const guesser = hotSeat(state) === "c" ? "b" : "c";
@@ -361,7 +424,38 @@ describe("secrecy", () => {
       expect(serialized).not.toContain("confidence");
       expect(serialized).not.toContain("evidenceIds");
       expect(serialized).not.toContain("digest-");
+      expect(serialized).not.toContain(chainTextFor(currentReadId(state)));
+      expect(view.round).not.toHaveProperty("chain");
     }
+  });
+
+  it("shows the reasoning chain only in the reveal phase", () => {
+    let state = started(["a", "b"]);
+    const card = state.schedule[0];
+    state = apply(state, reveal(state, "off"));
+    expect(toPublicState(state, "b").round?.chain).toEqual(card?.read.chain);
+  });
+
+  it("omits the chain at reveal when the read has none", () => {
+    let state = apply(lobbyWith(["a", "b"], []), {
+      type: "submit_deck",
+      playerId: "a",
+      deck: { ...makeDeck("a"), reads: makeDeck("a").reads.map(({ chain: _chain, ...read }) => read) },
+    });
+    state = apply(state, { type: "start", playerId: "a", cardsPerPlayer: 1, random: firstRandom });
+    state = apply(state, reveal(state, "off"));
+    expect(toPublicState(state).round).not.toHaveProperty("chain");
+  });
+
+  it("shows each viewer only their own guess during voting", () => {
+    let state = started(["a", "b", "c"]);
+    state = apply(state, guess(state, "b", "nailed"), guess(state, "c", "off"));
+    expect(toPublicState(state, "b").round?.yourGuess).toBe("nailed");
+    expect(toPublicState(state, "c").round?.yourGuess).toBe("off");
+    expect(toPublicState(state, "a").round).not.toHaveProperty("yourGuess");
+    expect(toPublicState(state).round).not.toHaveProperty("yourGuess");
+    const bView = JSON.stringify(toPublicState(state, "b"));
+    expect(bView).not.toContain("off");
   });
 
   it("reveals truth, guesses, confidence and points in the reveal phase", () => {

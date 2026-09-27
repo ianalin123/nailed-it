@@ -36,7 +36,7 @@ export interface InternalState {
 }
 
 export type GameEvent =
-  | { readonly type: "join"; readonly playerId: string; readonly nickname: string }
+  | { readonly type: "join"; readonly playerId: string; readonly nickname: string; readonly create: boolean }
   | { readonly type: "disconnect"; readonly playerId: string }
   | { readonly type: "submit_deck"; readonly playerId: string; readonly deck: Deck }
   | {
