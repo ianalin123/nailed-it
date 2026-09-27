@@ -7,6 +7,9 @@ export const ROOM_PARTY = "room";
 
 export const ROOM_CODE_LENGTH = 4;
 export const MIN_PLAYERS = 2;
+// One deck is enough: a single hot seat with everyone else guessing.
+export const MIN_DECKS = 1;
+export const MAX_CHAIN_STEPS = 6;
 export const MAX_PLAYERS = 12;
 export const MAX_READ_LENGTH = 240;
 
@@ -53,6 +56,14 @@ export const EvidenceDigest = z.object({
 });
 export type EvidenceDigest = z.infer<typeof EvidenceDigest>;
 
+// One step on the path from evidence to a read, shown at reveal as "how it knew".
+// Evidence steps quote owner-approved digest items only.
+export const ChainStep = z.object({
+  kind: z.enum(["evidence", "inference"]),
+  text: z.string().min(1).max(MAX_READ_LENGTH),
+});
+export type ChainStep = z.infer<typeof ChainStep>;
+
 export const Read = z.object({
   id: z.string().min(1),
   text: z.string().min(1).max(MAX_READ_LENGTH),
@@ -63,6 +74,7 @@ export const Read = z.object({
   // Inferential distance from the evidence. 0 means it restates an evidence item.
   hops: z.number().int().min(0).max(5),
   modelVersion: z.string().min(1),
+  chain: z.array(ChainStep).max(MAX_CHAIN_STEPS).optional(),
 });
 export type Read = z.infer<typeof Read>;
 
@@ -85,6 +97,7 @@ export const Player = z.object({
   isHost: z.boolean(),
   connected: z.boolean(),
   hasDeck: z.boolean(),
+  deckSize: z.number().int().min(0).optional(),
   score: z.number().int(),
   streak: z.number().int().min(0),
 });
@@ -100,10 +113,13 @@ export const Round = z.object({
   read: Read.pick({ id: true, text: true, category: true }),
   phase: RoundPhase,
   votedPlayerIds: z.array(z.string()),
+  // The viewer's own guess, sent only to that viewer, so a reload can restore it.
+  yourGuess: Guess.optional(),
   // Present only in the reveal phase.
   truth: Truth.optional(),
   guesses: z.record(z.string(), Guess).optional(),
   readerConfidence: z.number().min(0).max(1).optional(),
+  chain: z.array(ChainStep).max(MAX_CHAIN_STEPS).optional(),
   pointsAwarded: z.record(z.string(), z.number().int()).optional(),
 });
 export type Round = z.infer<typeof Round>;
@@ -129,6 +145,10 @@ export const ClientMessage = z.discriminatedUnion("type", [
     // Rejoining as an existing player requires the token from that player's welcome.
     playerId: z.string().optional(),
     token: z.string().optional(),
+    // "stage" is a display-only screen. It receives state and is never a player.
+    role: z.enum(["player", "stage"]).optional(),
+    // true creates the room and fails if it exists. false or absent joins an existing room.
+    create: z.boolean().optional(),
   }),
   z.object({ type: z.literal("submit_deck"), deck: Deck }),
   z.object({ type: z.literal("start"), cardsPerPlayer: z.number().int().min(1).max(10) }),
@@ -148,6 +168,11 @@ export const ErrorCode = z.enum([
   "not_enough_decks",
   "unknown_read",
   "bad_token",
+  "room_not_found",
+  "room_exists",
+  "not_joined",
+  "hot_seat_cannot_guess",
+  "stage_cannot_act",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 
