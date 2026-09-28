@@ -1,0 +1,15 @@
+{
+  "hotSeat": { "nickname": "Wren" },
+  "phone": { "nickname": "Theo", "guess": "nailed", "joinAfterMs": 1400, "voteAfterMs": 4600 },
+  "guessers": [
+    { "nickname": "Mika", "guess": "off", "joinAfterMs": 2700, "voteAfterMs": 2800 },
+    { "nickname": "Ada", "guess": "nailed", "joinAfterMs": 3900, "voteAfterMs": 6900 },
+    { "nickname": "Jules", "guess": "off", "joinAfterMs": 5200, "voteAfterMs": 9200 }
+  ],
+  "deckAfterMs": 6400,
+  "lobbyHoldMs": 3200,
+  "featuredReadId": "wren-list",
+  "coldOpenReadId": "wren-final",
+  "truth": "nailed",
+  "revealAfterLastVoteMs": 2400
+}

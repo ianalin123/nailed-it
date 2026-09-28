@@ -1,0 +1,32 @@
+{
+  "subject": "Wren",
+  "note": "Invented person, invented files.",
+  "sources": [
+    { "id": "notes", "label": "Notes" },
+    { "id": "chats", "label": "Messages" },
+    { "id": "git", "label": "Git history" },
+    { "id": "files", "label": "Files" },
+    { "id": "web", "label": "Bookmarks" }
+  ],
+  "evidence": [
+    { "id": "e1", "source": "notes", "text": "A note titled \"not yet\": 31 restaurants, no dates." },
+    { "id": "e2", "source": "git", "text": "Weeknight commits cluster between 11pm and 2am." },
+    { "id": "e3", "source": "files", "text": "final.pdf, final_v2.pdf, final_v3_REAL.pdf" },
+    { "id": "e4", "source": "chats", "text": "Nine of the 31 appear in one thread: \"when you're back\"." },
+    { "id": "e5", "source": "web", "text": "Two saved recipes for sourdough." },
+    { "id": "e6", "source": "git", "text": "Three commits say \"fix before bed\"." },
+    { "id": "e7", "source": "notes", "text": "A packing list for a trip in March." },
+    { "id": "e8", "source": "files", "text": "Same folder, four more files ending in _REAL." },
+    { "id": "e9", "source": "chats", "text": "A group chat renamed \"dinner?\" eleven times." }
+  ],
+  "inferences": [
+    { "id": "i1", "from": ["e1", "e4"], "text": "The list is about a person, not the food." },
+    { "id": "i2", "from": ["e2", "e6"], "text": "An open bug beats sleep." },
+    { "id": "i3", "from": ["e3", "e8"], "text": "Versions live in filenames." }
+  ],
+  "reads": [
+    { "id": "r1", "from": ["i1"], "text": "You keep a list of restaurants you will only try with one particular person." },
+    { "id": "r2", "from": ["i2"], "text": "You would rather fix a bug at 1am than sleep on it." },
+    { "id": "r3", "from": ["i3"], "text": "You name files final_v3_REAL.pdf and you are not proud of it." }
+  ]
+}

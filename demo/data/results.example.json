@@ -1,0 +1,24 @@
+{
+  "horoscopeTest": {
+    "evidenceNote": "PLACEHOLDER: describe the shared evidence, e.g. how many items",
+    "unit": "bits",
+    "base": {
+      "label": "PLACEHOLDER base model name",
+      "read": "PLACEHOLDER: the base model's read on the held-out evidence",
+      "infoGain": 999
+    },
+    "trained": {
+      "label": "PLACEHOLDER trained reader name",
+      "read": "PLACEHOLDER: the trained reader's read on the same evidence",
+      "infoGain": 999
+    }
+  },
+  "learning": {
+    "trainingSet": { "before": 99999, "after": 100000 },
+    "procedure": {
+      "title": "PLACEHOLDER: the stored procedure's title",
+      "steps": ["PLACEHOLDER step one", "PLACEHOLDER step two", "PLACEHOLDER step three"]
+    },
+    "recall": { "nextPlayer": "PLACEHOLDER", "stepsWithout": 999, "stepsWith": 999 }
+  }
+}

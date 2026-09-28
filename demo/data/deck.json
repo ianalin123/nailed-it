@@ -1,0 +1,87 @@
+{
+  "protocolVersion": 1,
+  "digestId": "demo-film-wren",
+  "reads": [
+    {
+      "id": "wren-list",
+      "text": "You keep a list of restaurants you will only try with one particular person.",
+      "category": "people_social",
+      "confidence": 0.62,
+      "evidenceIds": [],
+      "hops": 2,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "A note titled \"not yet\" lists 31 restaurants. None has a date next to it." },
+        { "kind": "evidence", "text": "Nine of them also appear in one chat thread, each followed by \"when you're back\"." },
+        { "kind": "inference", "text": "The list is less about the food than about who comes along." }
+      ]
+    },
+    {
+      "id": "wren-final",
+      "text": "You name files final_v3_REAL.pdf and you are not proud of it.",
+      "category": "work_style",
+      "confidence": 0.91,
+      "evidenceIds": [],
+      "hops": 1,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "final.pdf, final_v2.pdf and final_v3_REAL.pdf sit in the same folder." },
+        { "kind": "inference", "text": "Versions are tracked by filename, with rising urgency." }
+      ]
+    },
+    {
+      "id": "wren-late",
+      "text": "You would rather fix a bug at 1am than sleep on it.",
+      "category": "technical_identity",
+      "confidence": 0.86,
+      "evidenceIds": [],
+      "hops": 2,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "Most weeknight commits land between 11pm and 2am." },
+        { "kind": "evidence", "text": "Three commit messages say \"fix before bed\"." },
+        { "kind": "inference", "text": "An open bug is harder to sleep on than a late night." }
+      ]
+    },
+    {
+      "id": "wren-cards",
+      "text": "You keep every birthday card anyone has given you, in one shoebox.",
+      "category": "life_logistics",
+      "confidence": 0.32,
+      "evidenceIds": [],
+      "hops": 3,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "A photo album called \"cards\" holds 140 scans of handwritten cards." },
+        { "kind": "inference", "text": "Nothing sentimental gets thrown away." }
+      ]
+    },
+    {
+      "id": "wren-ships",
+      "text": "Once a month you disappear into reading about shipwrecks.",
+      "category": "intellectual_signature",
+      "confidence": 0.28,
+      "evidenceIds": [],
+      "hops": 3,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "Eleven bookmarks on lost ships and polar expeditions, saved in bursts weeks apart." },
+        { "kind": "inference", "text": "A recurring deep dive, not a passing click." }
+      ]
+    },
+    {
+      "id": "wren-dinner",
+      "text": "You are the one who books the group dinner, and you still arrive last.",
+      "category": "risky_read",
+      "confidence": 0.55,
+      "evidenceIds": [],
+      "hops": 3,
+      "modelVersion": "demo-film-v1",
+      "chain": [
+        { "kind": "evidence", "text": "Four booking confirmations forwarded to a group chat this year." },
+        { "kind": "evidence", "text": "On each of those nights: \"five minutes away\", sent after the booking time." },
+        { "kind": "inference", "text": "Organizing and punctuality are different skills here." }
+      ]
+    }
+  ]
+}
