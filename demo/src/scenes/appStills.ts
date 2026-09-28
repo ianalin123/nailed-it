@@ -1,4 +1,4 @@
-import { PLAY_LAYOUT } from "../plan/layout";
+import { PLAY_LAYOUT, type Rect } from "../plan/layout";
 import { tag } from "./parts";
 import { escapeHtml } from "./scene";
 
@@ -10,7 +10,7 @@ export const APP_COPY = {
     mock: "Real app, mock mode. Scripted players.",
   },
   join: "Everyone joins from their phone.",
-  play: "The room guesses. The hot seat tells the truth.",
+  play: { guessing: "The room guesses.", revealed: "The hot seat tells the truth." },
   bigScreen: "Big screen",
   phone: (name: string) => `${name}'s phone`,
   chain: "Then it shows its work.",
@@ -43,10 +43,20 @@ export const playBackground = ({ mode, phoneNickname }: PlayStillInput): string 
       : `<div class="phone-body" style="left:${phone.x - bezel}px;top:${phone.y - bezel}px;width:${phone.width + 2 * bezel}px;height:${phone.height + 2 * bezel}px;border-radius:${phoneRadius + bezel}px"></div>
          <p class="device-label" style="left:${phone.x}px;top:${phone.y + phone.height + bezel + 14}px;width:${phone.width}px;text-align:center">${escapeHtml(APP_COPY.phone(phoneNickname))}</p>`;
   const provenanceStyle = phoneNickname === null ? "right:160px;top:62px" : `right:${1920 - stageBox.x - stageBox.width}px;top:${stageBox.y + stageBox.height + 18}px`;
-  return `${caption(APP_COPY.play, `left:${stageBox.x}px;top:52px;font-size:46px`)}${screenFrame}${stageLabel}${phoneParts}${provenance(mode, provenanceStyle)}`;
+  return `${screenFrame}${stageLabel}${phoneParts}${provenance(mode, provenanceStyle)}`;
 };
 
-export const chainBackground = (mode: RecordingMode): string =>
+export type PlayPhase = keyof typeof APP_COPY.play;
+
+export const playCaption = (phase: PlayPhase, phoneNickname: string | null): string => {
+  const stageBox = phoneNickname === null ? MOCK_PLAY_STAGE : PLAY_LAYOUT.stage;
+  return caption(APP_COPY.play[phase], `left:${stageBox.x}px;top:52px;font-size:46px`);
+};
+
+const DIM = "rgba(18, 26, 92, 0.66)";
+
+export const chainOverlay = (mode: RecordingMode, hole: Rect): string =>
+  `<div data-spotlight="true" style="left:${hole.x}px;top:${hole.y}px;width:${hole.width}px;height:${hole.height}px;position:absolute;border-radius:16px;box-shadow:0 0 0 4000px ${DIM};outline:3px solid var(--soft);outline-offset:0"></div>` +
   `${caption(APP_COPY.chain, "left:80px;bottom:52px")}${provenance(mode, "right:80px;bottom:58px")}`;
 
 export const phoneMask = (): string => {

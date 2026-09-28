@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appClipArgs, concatArgs, sceneEncodeArgs, stillArgs, xfadeOffsets } from "./args";
+import { appClipArgs, concatArgs, contactSheetArgs, contactTimes, regionProbeArgs, sceneEncodeArgs, stillArgs, xfadeOffsets } from "./args";
 
 const valueAfter = (args: readonly string[], flag: string): string | undefined => args[args.indexOf(flag) + 1];
 
@@ -29,7 +29,7 @@ describe("appClipArgs", () => {
     duration: 17.25,
     fps: 30,
     background: "/o/bg5.png",
-    overlay: "/o/over5.png",
+    overlays: [{ path: "/o/over5.png" }],
     layers: [
       { file: "/raw/stage.webm", start: 12.6, box: { x: 48, y: 150, width: 1360, height: 766 } },
       {
@@ -84,7 +84,7 @@ describe("appClipArgs", () => {
   });
 
   it("works without an overlay", () => {
-    const plain = appClipArgs({ ...spec, overlay: null, layers: [spec.layers[0]!] });
+    const plain = appClipArgs({ ...spec, overlays: [], layers: [spec.layers[0]!] });
     expect(valueAfter(plain, "-filter_complex")).not.toContain("alphamerge");
   });
 });
@@ -135,5 +135,59 @@ describe("stillArgs", () => {
     expect(valueAfter(args, "-ss")).toBe("3.500");
     expect(valueAfter(args, "-frames:v")).toBe("1");
     expect(args.at(-1)).toBe("/f/1.png");
+  });
+});
+
+describe("timed overlays", () => {
+  const spec = {
+    out: "/o/b.mp4",
+    duration: 10,
+    fps: 30,
+    background: "/o/bg.png",
+    layers: [{ file: "/raw/stage.webm", start: 1, box: { x: 0, y: 0, width: 1920, height: 1080 } }],
+    overlays: [
+      { path: "/o/a.png", until: 6 },
+      { path: "/o/b.png", from: 6 },
+      { path: "/o/c.png", fadeIn: { start: 0.4, duration: 0.8 } },
+    ],
+  };
+  const filter = valueAfter(appClipArgs(spec), "-filter_complex") ?? "";
+
+  it("limits an overlay to its time window", () => {
+    expect(filter).toContain("enable='lt(t,6.000)'");
+    expect(filter).toContain("enable='gte(t,6.000)'");
+  });
+
+  it("fades an overlay in through its alpha", () => {
+    expect(filter).toContain("fade=t=in:st=0.400:d=0.800:alpha=1");
+  });
+});
+
+describe("encode quality", () => {
+  it("uses CRF 16", () => {
+    expect(valueAfter(sceneEncodeArgs({ out: "/o/x.mp4", fps: 30, frames: 1 }), "-crf")).toBe("16");
+  });
+});
+
+describe("contact sheets", () => {
+  it("samples 0, 25, 50, 75 and 100 percent, the last one far enough before the end to decode", () => {
+    expect(contactTimes(8)).toEqual([0, 2, 4, 6, 7.9]);
+  });
+
+  it("tiles five seeks into one strip", () => {
+    const args = contactSheetArgs({ clip: "/c/5.mp4", duration: 8, out: "/f/5-contact.png" });
+    expect(args.filter((a) => a === "/c/5.mp4")).toHaveLength(5);
+    expect(valueAfter(args, "-filter_complex")).toContain("hstack=inputs=5");
+    expect(args.at(-1)).toBe("/f/5-contact.png");
+  });
+});
+
+describe("regionProbeArgs", () => {
+  it("crops a region at a time and emits small raw RGB", () => {
+    const args = regionProbeArgs({ clip: "/c/5.mp4", at: 3, region: { x: 1452, y: 70, width: 420, height: 908 }, size: { width: 42, height: 91 } });
+    expect(valueAfter(args, "-vf")).toBe("crop=420:908:1452:70,scale=42:91");
+    expect(valueAfter(args, "-pix_fmt")).toBe("rgb24");
+    expect(valueAfter(args, "-f")).toBe("rawvideo");
+    expect(args.at(-1)).toBe("-");
   });
 });

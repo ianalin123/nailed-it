@@ -6,7 +6,7 @@ import { coldOpenScene } from "./coldOpen";
 import { horoscopeScene } from "./horoscope";
 import { learnedScene } from "./learned";
 import { scanScene } from "./scan";
-import { chainBackground, joinOverlay, playBackground } from "./appStills";
+import { chainOverlay, joinOverlay, playBackground, playCaption } from "./appStills";
 import type { Scene } from "./scene";
 
 type Horoscope = NonNullable<Results["horoscopeTest"]>;
@@ -169,11 +169,31 @@ describe("app stills", () => {
   it("say plainly what was recorded and how", () => {
     expect(joinOverlay("real")).toMatch(/Real app, real server/);
     expect(joinOverlay("mock")).toMatch(/mock mode/);
-    expect(chainBackground("real")).toMatch(/How it knew|shows its work/);
+    expect(chainOverlay("real", { x: 1090, y: 84, width: 806, height: 807 })).toMatch(/shows its work/);
   });
 
   it("labels the phone with the player's name", () => {
     expect(playBackground({ mode: "real", phoneNickname: "Theo" })).toContain("Theo's phone");
     expect(playBackground({ mode: "mock", phoneNickname: null })).not.toContain("phone");
+  });
+});
+
+describe("beat 5 captions", () => {
+  it("split into the guess and the truth so each matches what is on screen", () => {
+    expect(playCaption("guessing", null)).toContain("The room guesses.");
+    expect(playCaption("guessing", null)).not.toContain("truth");
+    expect(playCaption("revealed", null)).toContain("The hot seat tells the truth.");
+  });
+
+  it("the play background no longer carries a caption", () => {
+    expect(playBackground({ mode: "real", phoneNickname: "Theo" })).not.toContain("guesses");
+  });
+});
+
+describe("beat 6 spotlight", () => {
+  it("dims everything outside the chain panel and leaves the panel clear", () => {
+    const html = chainOverlay("real", { x: 1090, y: 84, width: 806, height: 807 });
+    expect(html).toMatch(/data-spotlight[^>]*left:1090px;top:84px;width:806px;height:807px/);
+    expect(html).toContain("box-shadow");
   });
 });

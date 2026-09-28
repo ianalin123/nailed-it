@@ -10,7 +10,7 @@ const encodeH264 = (fps: number): string[] => [
   "-preset",
   "medium",
   "-crf",
-  "18",
+  "16",
   "-pix_fmt",
   "yuv420p",
   "-color_range",
@@ -48,13 +48,29 @@ export type VideoLayer = {
   mask?: string;
 };
 
+export type TimedOverlay = {
+  path: string;
+  from?: number;
+  until?: number;
+  fadeIn?: { start: number; duration: number };
+};
+
 export type AppClipSpec = {
   out: string;
   duration: number;
   fps: number;
   background: string;
-  overlay: string | null;
+  overlays: readonly TimedOverlay[];
   layers: readonly VideoLayer[];
+};
+
+const enableFor = (overlay: TimedOverlay): string => {
+  if (overlay.from !== undefined && overlay.until !== undefined) {
+    return `:enable='between(t,${sec(overlay.from)},${sec(overlay.until)})'`;
+  }
+  if (overlay.from !== undefined) return `:enable='gte(t,${sec(overlay.from)})'`;
+  if (overlay.until !== undefined) return `:enable='lt(t,${sec(overlay.until)})'`;
+  return "";
 };
 
 type Graph = { inputs: string[]; filters: string[]; next: number };
@@ -104,12 +120,13 @@ export const appClipArgs = (spec: AppClipSpec): string[] => {
     graph.filters.push(`[${base}][${label}]overlay=${layer.box.x}:${layer.box.y}:eof_action=repeat[${next}]`);
     base = next;
   });
-  if (spec.overlay !== null) {
-    const overlay = addInput(graph, stillInput(spec.overlay, spec.fps, spec.duration));
-    graph.filters.push(`${normalize(overlay, spec.fps)},format=rgba[over]`);
-    graph.filters.push(`[${base}][over]overlay=0:0[top]`);
-    base = "top";
-  }
+  spec.overlays.forEach((overlay, i) => {
+    const input = addInput(graph, stillInput(overlay.path, spec.fps, spec.duration));
+    const fade = overlay.fadeIn ? `,fade=t=in:st=${sec(overlay.fadeIn.start)}:d=${sec(overlay.fadeIn.duration)}:alpha=1` : "";
+    graph.filters.push(`${normalize(input, spec.fps)},format=rgba${fade}[over${i}]`);
+    graph.filters.push(`[${base}][over${i}]overlay=0:0${enableFor(overlay)}[top${i}]`);
+    base = `top${i}`;
+  });
   graph.filters.push(`[${base}]format=yuv420p[out]`);
   return [
     ...COMMON,
@@ -162,3 +179,39 @@ export const concatArgs = ({ clips, fade, out, fps }: ConcatSpec): string[] => {
 export type StillSpec = { clip: string; at: number; out: string };
 
 export const stillArgs = ({ clip, at, out }: StillSpec): string[] => [...COMMON, "-ss", sec(at), "-i", clip, "-frames:v", "1", out];
+
+const END_MARGIN_SECONDS = 0.1;
+
+export const contactTimes = (duration: number): number[] =>
+  [0, 0.25, 0.5, 0.75].map((f) => f * duration).concat(Math.max(0, duration - END_MARGIN_SECONDS));
+
+export type ContactSheetSpec = { clip: string; duration: number; out: string };
+
+const TILE = { width: 384, height: 216 } as const;
+
+export const contactSheetArgs = ({ clip, duration, out }: ContactSheetSpec): string[] => {
+  const times = contactTimes(duration);
+  const inputs = times.flatMap((t) => ["-ss", sec(t), "-i", clip]);
+  const tiles = times.map((_, i) => `[${i}:v]scale=${TILE.width}:${TILE.height}:flags=lanczos,setsar=1[t${i}]`);
+  const stack = `${times.map((_, i) => `[t${i}]`).join("")}hstack=inputs=${times.length}[out]`;
+  return [...COMMON, ...inputs, "-filter_complex", [...tiles, stack].join(";"), "-map", "[out]", "-frames:v", "1", out];
+};
+
+export type RegionProbeSpec = { clip: string; at: number; region: Rect; size: { width: number; height: number } };
+
+export const regionProbeArgs = ({ clip, at, region, size }: RegionProbeSpec): string[] => [
+  ...COMMON,
+  "-ss",
+  sec(at),
+  "-i",
+  clip,
+  "-frames:v",
+  "1",
+  "-vf",
+  `crop=${region.width}:${region.height}:${region.x}:${region.y},scale=${size.width}:${size.height}`,
+  "-pix_fmt",
+  "rgb24",
+  "-f",
+  "rawvideo",
+  "-",
+];

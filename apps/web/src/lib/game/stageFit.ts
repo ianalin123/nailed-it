@@ -98,3 +98,19 @@ export const fitChain = (steps: readonly PresentedStep[], box: Box, sizes: reado
   }
   return truncateChain(steps, box, STAGE_FLOOR_U);
 };
+
+// Stamp label metrics: extra-wide black caps, measured generously so the box is never too small.
+export const STAMP_CHAR_EM = 0.9;
+export const STAMP_CHROME = { padXU: 1.1, padYU: 0.45, borderU: 0.35 } as const;
+
+export type Footprint = { widthU: number; heightU: number };
+
+export const stampFootprint = (label: string, sizeU: number, tiltDeg: number): Footprint => {
+  const width = label.length * STAMP_CHAR_EM * sizeU + 2 * (STAMP_CHROME.padXU + STAMP_CHROME.borderU);
+  const height = sizeU + 2 * (STAMP_CHROME.padYU + STAMP_CHROME.borderU);
+  const radians = (Math.abs(tiltDeg) * Math.PI) / 180;
+  return {
+    widthU: width * Math.cos(radians) + height * Math.sin(radians),
+    heightU: width * Math.sin(radians) + height * Math.cos(radians),
+  };
+};

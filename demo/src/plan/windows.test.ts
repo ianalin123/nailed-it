@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Markers } from "../record/markers";
-import { appWindows } from "./windows";
+import { appWindows, revealFraction } from "./windows";
 
 const markers = (overrides: Partial<Markers> = {}): Markers => ({
   mode: "real",
@@ -29,9 +29,9 @@ describe("appWindows", () => {
     expect(end).toBeLessThanOrEqual((14_000 - 1_000) / 1000);
   });
 
-  it("runs play from just before voting to after the reveal", () => {
+  it("runs play from the moment the card appears to after the reveal, so it never opens on the lobby", () => {
     const w = appWindows(markers());
-    expect(w.play.start).toBeCloseTo((14_000 - 400 - 1_000) / 1000);
+    expect(w.play.start).toBeCloseTo((14_000 - 1_000) / 1000);
     expect(w.play.start + w.play.duration).toBeCloseTo((26_000 + 5_500 - 1_000) / 1000);
   });
 
@@ -46,11 +46,32 @@ describe("appWindows", () => {
 
   it("starts how-it-knew after the reveal and never runs past the recording", () => {
     const w = appWindows(markers({ endAt: 34_000 }));
-    expect(w.chain.start).toBeCloseTo((26_000 + 1_600 - 1_000) / 1000);
+    expect(w.chain.start).toBeCloseTo((26_000 + 2_200 - 1_000) / 1000);
     expect(w.chain.start + w.chain.duration).toBeLessThanOrEqual((34_000 - 1_000) / 1000);
   });
 
   it("fails loudly when markers are out of order", () => {
     expect(() => appWindows(markers({ revealAt: 10_000 }))).toThrow(/revealAt/);
+  });
+});
+
+describe("revealFraction", () => {
+  it("puts the stamp about two thirds through the play beat of the first real recording", () => {
+    const real = markers({
+      stage: { file: "stage.webm", startedAt: 1790554219036 },
+      phone: { file: "phone.webm", startedAt: 1790554221116, nickname: "Theo" },
+      lobbyAt: 1790554219630,
+      lobbyEvents: [1790554226104],
+      votingAt: 1790554229332,
+      revealAt: 1790554240975,
+      endAt: 1790554253498,
+    });
+    const fraction = revealFraction(real);
+    expect(fraction).toBeGreaterThan(0.6);
+    expect(fraction).toBeLessThan(0.75);
+  });
+
+  it("keeps how-it-knew short enough that the finished chain does not sit static for long", () => {
+    expect(appWindows(markers()).chain.duration).toBeLessThanOrEqual(7);
   });
 });

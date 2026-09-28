@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import { parseArgs, type Args } from "./cli/args";
-import { findRead, parseCast, parseDeck, planDeal, type Cast } from "./data/deck";
+import { coldOpenRead, findRead, parseCast, parseDeck, planDeal, type Cast } from "./data/deck";
 import { readJsonFile } from "./data/json";
 import { loadResults, type ResultsLoad } from "./data/results";
 import { parseScan } from "./data/scan";
@@ -12,7 +12,7 @@ import { APP_BEATS, beatLabel, finalizeAppBeats, needsRecording, planBeats, type
 import { recordApp } from "./record/app";
 import { MARKERS_FILE, loadMarkers, type Markers } from "./record/markers";
 import { ServerFleet, startServers } from "./record/servers";
-import { assembleFilm, renderAppBeat, renderScene, type Clip } from "./render/compose";
+import { assembleFilm, renderAppBeat, renderScene, writeContactSheets, type Clip } from "./render/compose";
 import { openStudio } from "./render/studio";
 import { closeScene } from "./scenes/close";
 import { coldOpenScene } from "./scenes/coldOpen";
@@ -26,7 +26,7 @@ type Data = { deck: ReturnType<typeof parseDeck>; cast: Cast; results: ResultsLo
 const loadData = (): Data => {
   const deck = parseDeck(readJsonFile(join(DATA_DIR, "deck.json"), "deck.json"));
   const cast = parseCast(readJsonFile(join(DATA_DIR, "cast.json"), "cast.json"));
-  findRead(deck, cast.coldOpenReadId, "coldOpenReadId");
+  findRead(deck, cast.featuredReadId, "featuredReadId");
   return { deck, cast, results: loadResults(DATA_DIR) };
 };
 
@@ -34,7 +34,7 @@ const sceneFor = (beat: BeatId, data: Data): Scene => {
   const results = data.results.kind === "loaded" ? data.results.results : null;
   switch (beat) {
     case 1:
-      return coldOpenScene({ read: findRead(data.deck, data.cast.coldOpenReadId, "coldOpenReadId").text });
+      return coldOpenScene({ read: coldOpenRead(data.deck, data.cast).text });
     case 3:
       return scanScene(parseScan(readJsonFile(join(DATA_DIR, "scan.json"), "scan.json")));
     case 4: {
@@ -145,6 +145,7 @@ const run = async (args: Args, cleanup: Cleanup): Promise<void> => {
   }
 
   const film = await assembleFilm(clips, FRAMES_DIR, FILM_PATH);
+  if (args.contactSheet) await writeContactSheets(clips, film.durations, FRAMES_DIR);
   log("done");
   for (const d of film.durations) log(`  ${beatLabel(d.beat)}: ${d.seconds.toFixed(2)}s`);
   for (const o of omitted) log(`  omitted ${beatLabel(o.beat)}: ${o.reason}`);

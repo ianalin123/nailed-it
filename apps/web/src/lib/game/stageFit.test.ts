@@ -6,6 +6,7 @@ import {
   leaderboardColumns,
   pickTypeSize,
   resultsLayout,
+  stampFootprint,
   voterRowSize,
   type ChainItem,
 } from "./stageFit";
@@ -131,5 +132,24 @@ describe("fitChain", () => {
 
   it("returns nothing for an empty chain", () => {
     expect(fitChain([], box)).toEqual({ sizeU: STAGE_FLOOR_U, items: [], hidden: 0, heightU: 0 });
+  });
+});
+
+describe("stampFootprint", () => {
+  it("is wider for longer labels", () => {
+    const nailed = stampFootprint("Nailed it", 2.8, 0);
+    const partly = stampFootprint("Partly", 2.8, 0);
+    expect(nailed.widthU).toBeGreaterThan(partly.widthU);
+  });
+
+  it("grows its bounding box when rotated", () => {
+    const flat = stampFootprint("Nailed it", 2.8, 0);
+    const tilted = stampFootprint("Nailed it", 2.8, -5);
+    expect(tilted.heightU).toBeGreaterThan(flat.heightU);
+    expect(tilted.widthU).toBeGreaterThanOrEqual(flat.widthU * Math.cos((5 * Math.PI) / 180));
+  });
+
+  it("is symmetric in tilt direction", () => {
+    expect(stampFootprint("Way off", 2.8, 4)).toEqual(stampFootprint("Way off", 2.8, -4));
   });
 });

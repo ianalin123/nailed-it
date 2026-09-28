@@ -14,10 +14,10 @@ export const TIMING = {
   joinMin: 9_000,
   joinTail: 2_000,
   joinGapBeforeVoting: 300,
-  playLead: 400,
+  playLead: 0,
   playTail: 5_500,
-  chainLead: 1_600,
-  chainLength: 10_000,
+  chainLead: 2_200,
+  chainLength: 6_500,
   chainGapBeforeEnd: 200,
   minimumRecordingAfterReveal: 12_000,
 } as const;
@@ -64,4 +64,10 @@ export const appWindows = (markers: Markers): AppWindows => {
     playPhoneStart: phoneShift === null ? null : seconds(playStart - origin - phoneShift),
     chain: { start: seconds(chainStart - origin), duration: seconds(chainEnd - chainStart) },
   };
+};
+
+export const revealFraction = (markers: Markers): number => {
+  const play = appWindows(markers).play;
+  const revealInClip = (markers.revealAt - markers.stage.startedAt) / 1000 - play.start;
+  return revealInClip / play.duration;
 };

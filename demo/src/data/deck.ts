@@ -25,7 +25,6 @@ const CastSchema = z
     deckAfterMs: delay,
     lobbyHoldMs: delay,
     featuredReadId: z.string().min(1),
-    coldOpenReadId: z.string().min(1),
     truth: Truth,
     revealAfterLastVoteMs: delay,
   })
@@ -49,6 +48,8 @@ export const findRead = (deck: Deck, id: string, field: string): Read => {
   }
   return read;
 };
+
+export const coldOpenRead = (deck: Deck, cast: Cast): Read => findRead(deck, cast.featuredReadId, "featuredReadId");
 
 const hasChain = (read: Read): boolean => (read.chain?.length ?? 0) > 0;
 

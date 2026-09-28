@@ -24,7 +24,7 @@ export type RecordInput = {
 const GUESS_BUTTON: Record<Guess, string> = { nailed: "Nailed it", off: "Way off" };
 const MOCK_POST_REVEAL_MS = 8_200;
 const REAL_POST_REVEAL_MS = TIMING.minimumRecordingAfterReveal + 500;
-const PHONE_DSF = 2;
+const PHONE_DSF = 1;
 
 const HIDE_DEV_TOOLS = `document.addEventListener("DOMContentLoaded", () => {
   const style = document.createElement("style");

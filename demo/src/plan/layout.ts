@@ -14,12 +14,9 @@ export const PLAY_LAYOUT = {
   bezel: 14,
 } as const;
 
-export const CHAIN_TARGET: Rect = { x: 80, y: 40, width: 1760, height: 880 };
-export const CHAIN_MAX_UPSCALE = 1.8;
-const CHAIN_PADDING = 32;
+export const SPOTLIGHT_PADDING = 24;
 
 export const even = (n: number): number => 2 * Math.floor(n / 2);
-const evenUp = (n: number): number => 2 * Math.ceil(n / 2);
 
 export const fitInto = (content: Size, box: Rect): Rect => {
   const scale = Math.min(box.width / content.width, box.height / content.height);
@@ -33,30 +30,20 @@ export const fitInto = (content: Size, box: Rect): Rect => {
   };
 };
 
-const clamp = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value));
-
-const sizeForAspect = (padded: Size, aspect: number, minWidth: number, frame: Size): Size => {
-  let width = Math.max(padded.width, padded.height * aspect, minWidth);
-  let height = width / aspect;
-  if (width > frame.width) {
-    width = frame.width;
-    height = width / aspect;
+export const phoneCrop = (video: Size, viewport: Size): Rect | null => {
+  if (video.width < viewport.width || video.height < viewport.height) {
+    throw new Error(
+      `The phone video is ${video.width}x${video.height}, smaller than the phone viewport ${viewport.width}x${viewport.height}.`,
+    );
   }
-  if (height > frame.height) {
-    height = frame.height;
-    width = height * aspect;
-  }
-  return { width: Math.min(evenUp(width), even(frame.width)), height: Math.min(evenUp(height), even(frame.height)) };
+  if (video.width === viewport.width && video.height === viewport.height) return null;
+  return { x: 0, y: 0, ...viewport };
 };
 
-export const cropForChain = (box: Rect, frame: Size, target: Rect, maxUpscale: number): Rect => {
-  const padded = { width: box.width + 2 * CHAIN_PADDING, height: box.height + 2 * CHAIN_PADDING };
-  const size = sizeForAspect(padded, target.width / target.height, target.width / maxUpscale, frame);
-  const centreX = box.x + box.width / 2;
-  const centreY = box.y + box.height / 2;
-  return {
-    x: Math.round(clamp(centreX - size.width / 2, 0, frame.width - size.width)),
-    y: Math.round(clamp(centreY - size.height / 2, 0, frame.height - size.height)),
-    ...size,
-  };
+export const spotlight = (box: Rect, frame: Size, padding: number): Rect => {
+  const left = Math.max(0, Math.round(box.x - padding));
+  const top = Math.max(0, Math.round(box.y - padding));
+  const right = Math.min(frame.width, Math.round(box.x + box.width + padding));
+  const bottom = Math.min(frame.height, Math.round(box.y + box.height + padding));
+  return { x: left, y: top, width: right - left, height: bottom - top };
 };

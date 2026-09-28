@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FRAME, PLAY_LAYOUT, cropForChain, even, fitInto } from "./layout";
+import { FRAME, PLAY_LAYOUT, even, fitInto, phoneCrop, spotlight } from "./layout";
 
 describe("fitInto", () => {
   it("fits by width and centres vertically", () => {
@@ -25,33 +25,6 @@ describe("even", () => {
   });
 });
 
-describe("cropForChain", () => {
-  const target = { x: 80, y: 60, width: 1760, height: 880 };
-
-  it("matches the target aspect and contains the chain", () => {
-    const box = { x: 1000, y: 150, width: 820, height: 420 };
-    const crop = cropForChain(box, FRAME, target, 1.8);
-    expect(crop.width / crop.height).toBeCloseTo(2, 1);
-    expect(crop.x).toBeLessThanOrEqual(box.x);
-    expect(crop.y).toBeLessThanOrEqual(box.y);
-    expect(crop.x + crop.width).toBeGreaterThanOrEqual(box.x + box.width);
-    expect(crop.y + crop.height).toBeGreaterThanOrEqual(box.y + box.height);
-  });
-
-  it("stays inside the frame", () => {
-    const crop = cropForChain({ x: 1500, y: 900, width: 400, height: 170 }, FRAME, target, 1.8);
-    expect(crop.x).toBeGreaterThanOrEqual(0);
-    expect(crop.y).toBeGreaterThanOrEqual(0);
-    expect(crop.x + crop.width).toBeLessThanOrEqual(FRAME.width);
-    expect(crop.y + crop.height).toBeLessThanOrEqual(FRAME.height);
-  });
-
-  it("limits upscaling so a small chain is not blown up past the limit", () => {
-    const crop = cropForChain({ x: 900, y: 300, width: 200, height: 100 }, FRAME, target, 1.8);
-    expect(target.width / crop.width).toBeLessThanOrEqual(1.8 + 1e-6);
-  });
-});
-
 describe("PLAY_LAYOUT", () => {
   it("keeps the stage and phone apart and inside the frame", () => {
     const { stage, phone } = PLAY_LAYOUT;
@@ -59,5 +32,35 @@ describe("PLAY_LAYOUT", () => {
     expect(phone.y + phone.height).toBeLessThanOrEqual(FRAME.height);
     expect(stage.width / stage.height).toBeCloseTo(16 / 9, 2);
     expect(phone.width / phone.height).toBeCloseTo(390 / 844, 2);
+  });
+});
+
+describe("phoneCrop", () => {
+  const viewport = { width: 390, height: 844 };
+
+  it("needs no crop when the video matches the viewport", () => {
+    expect(phoneCrop({ width: 390, height: 844 }, viewport)).toBeNull();
+  });
+
+  it("crops the top-left viewport region out of a padded video", () => {
+    expect(phoneCrop({ width: 780, height: 1688 }, viewport)).toEqual({ x: 0, y: 0, width: 390, height: 844 });
+  });
+
+  it("refuses a video smaller than the viewport", () => {
+    expect(() => phoneCrop({ width: 300, height: 600 }, viewport)).toThrow(/smaller than the phone viewport/);
+  });
+});
+
+describe("spotlight", () => {
+  it("pads the chain box and keeps it inside the frame", () => {
+    const hole = spotlight({ x: 1113.6, y: 107.5, width: 748.8, height: 759.9 }, FRAME, 24);
+    expect(hole).toEqual({ x: 1090, y: 84, width: 796, height: 807 });
+    expect(hole.x + hole.width).toBeLessThanOrEqual(FRAME.width);
+  });
+
+  it("clamps at the frame edge", () => {
+    const hole = spotlight({ x: 1890, y: 5, width: 100, height: 50 }, FRAME, 24);
+    expect(hole.x + hole.width).toBe(FRAME.width);
+    expect(hole.y).toBe(0);
   });
 });

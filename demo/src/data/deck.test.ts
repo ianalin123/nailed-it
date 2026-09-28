@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Deck, Read } from "@nailed-it/protocol";
 import { describe, expect, it } from "vitest";
-import { CONFIDENCE_BAND, bandDistance, parseCast, parseDeck, planDeal, roundScript } from "./deck";
+import { CONFIDENCE_BAND, bandDistance, coldOpenRead, parseCast, parseDeck, planDeal, roundScript } from "./deck";
 
 const DATA = join(import.meta.dirname, "../../data");
 const readJson = (name: string): unknown => JSON.parse(readFileSync(join(DATA, name), "utf8"));
@@ -96,5 +96,19 @@ describe("roundScript", () => {
     const times = script.votes.map((v) => v.atMs);
     expect([...times].sort((a, b) => a - b)).toEqual(times);
     expect(script.revealAtMs).toBe(Math.max(...times) + cast.revealAfterLastVoteMs);
+  });
+});
+
+describe("coldOpenRead", () => {
+  it("is the featured read, the same card that gets dealt, played and stamped", () => {
+    const deckData = parseDeck(readJson("deck.json"));
+    const cast = parseCast(readJson("cast.json"));
+    const plan = planDeal(deckData, cast.featuredReadId);
+    expect(plan.kind).toBe("pinned");
+    expect(coldOpenRead(deckData, cast)).toEqual(plan.deck.reads[0]);
+  });
+
+  it("cast.json no longer carries a separate cold open read", () => {
+    expect(readJson("cast.json")).not.toHaveProperty("coldOpenReadId");
   });
 });

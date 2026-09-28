@@ -9,7 +9,6 @@
   "deckAfterMs": 6400,
   "lobbyHoldMs": 3200,
   "featuredReadId": "wren-list",
-  "coldOpenReadId": "wren-final",
   "truth": "nailed",
   "revealAfterLastVoteMs": 2400
 }

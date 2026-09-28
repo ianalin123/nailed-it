@@ -38,7 +38,7 @@ function JoinCard({ code }: { code: string }) {
 export function StageLobby({ room }: StageProps) {
   const decks = deckCount(room);
   return (
-    <div className="grid h-full grid-cols-[auto_1fr] items-start" style={{ gap: u(4) }}>
+    <div className="grid h-full grid-cols-[auto_1fr] items-center" style={{ gap: u(4) }}>
       <JoinCard code={room.code} />
       <div className="flex min-w-0 flex-col" style={{ gap: u(2.5) }}>
         <div>

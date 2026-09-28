@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 
 const FFMPEG_CANDIDATES = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"];
 
@@ -36,6 +36,14 @@ export const runFfmpeg = async (args: readonly string[], label: string): Promise
   await run(ffmpegPath(), args, label);
 };
 
+export const runFfmpegToFile = async (args: readonly string[], out: string, label: string): Promise<void> => {
+  rmSync(out, { force: true });
+  await runFfmpeg(args, label);
+  if (!existsSync(out)) {
+    throw new Error(`${label}: ffmpeg exited cleanly but wrote nothing to ${out}. A seek past the last frame is the usual cause.`);
+  }
+};
+
 export const probeDuration = async (file: string, label: string): Promise<number> => {
   const out = await run(
     ffprobePath(),
@@ -46,6 +54,29 @@ export const probeDuration = async (file: string, label: string): Promise<number
   if (!Number.isFinite(duration) || duration <= 0) throw new Error(`${label}: ffprobe reported duration "${out.trim()}" for ${file}`);
   return duration;
 };
+
+export const probeVideoSize = async (file: string, label: string): Promise<{ width: number; height: number }> => {
+  const out = await run(
+    ffprobePath(),
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file],
+    label,
+  );
+  const match = /^(\d+)x(\d+)/.exec(out.trim());
+  if (!match) throw new Error(`${label}: ffprobe reported size "${out.trim()}" for ${file}`);
+  return { width: Number(match[1]), height: Number(match[2]) };
+};
+
+export const runFfmpegBinary = async (args: readonly string[], label: string): Promise<Buffer> =>
+  new Promise((resolve, reject) => {
+    const command = ffmpegPath();
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on("error", (error) => reject(new Error(`${label}: could not start ${command}: ${error.message}`)));
+    child.on("close", (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(failure(label, command, args, code, stderr))));
+  });
 
 export type FramePipe = { write: (frame: Buffer) => Promise<void>; end: () => Promise<void> };
 

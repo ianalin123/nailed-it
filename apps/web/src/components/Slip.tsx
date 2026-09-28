@@ -38,7 +38,7 @@ export function Slip({ header, children, footer, stamp, feedKey, size = "play" }
       ) : null}
       <blockquote className={cx("font-machine font-bold text-pretty", TEXT[size])}>{children}</blockquote>
       {footer ? <figcaption className="mt-5 font-machine text-base text-ink/80">{footer}</figcaption> : null}
-      {stamp ? <div className={cx("pointer-events-none flex justify-end pr-1", stage ? "mt-[1.2vw]" : "mt-4")}>{stamp}</div> : null}
+      {stamp ? <div className={cx("pointer-events-none flex justify-end pr-1", stage ? "mt-[1.2vw]" : "mt-6")}>{stamp}</div> : null}
     </figure>
   );
 }

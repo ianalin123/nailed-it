@@ -4,11 +4,12 @@ export type Args = {
   beats: BeatId[];
   mock: boolean;
   reuseRecording: boolean;
+  contactSheet: boolean;
   webPort: number;
   roomPort: number;
 };
 
-const DEFAULTS: Args = { beats: [...ALL_BEATS], mock: false, reuseRecording: false, webPort: 3217, roomPort: 8787 };
+const DEFAULTS: Args = { beats: [...ALL_BEATS], mock: false, reuseRecording: false, contactSheet: false, webPort: 3217, roomPort: 8787 };
 
 const parseBeats = (value: string): BeatId[] => {
   const beats = value.split(",").map((part) => {
@@ -54,6 +55,9 @@ export const parseArgs = (argv: readonly string[]): Args => {
       case "--reuse-recording":
         args.reuseRecording = true;
         break;
+      case "--contact-sheet":
+        args.contactSheet = true;
+        break;
       case "--web-port":
         args.webPort = parsePort(flag, takeValue());
         break;
@@ -62,7 +66,7 @@ export const parseArgs = (argv: readonly string[]): Args => {
         break;
       default:
         throw new Error(
-          `Unknown flag "${flag}". Flags: --beats 1,5,6  --mock  --reuse-recording  --web-port N  --room-port N`,
+          `Unknown flag "${flag}". Flags: --beats 1,5,6  --mock  --reuse-recording  --contact-sheet  --web-port N  --room-port N`,
         );
     }
   }

@@ -1,5 +1,7 @@
+import type { CSSProperties } from "react";
 import type { Truth } from "@nailed-it/protocol";
 import { TRUTH_LABEL } from "@/lib/game/selectors";
+import { STAMP_CHROME } from "@/lib/game/stageFit";
 import { cx } from "./cx";
 
 const INK: Record<Truth, string> = {
@@ -8,27 +10,38 @@ const INK: Record<Truth, string> = {
   off: "text-ink border-ink",
 };
 
-const TILT: Record<Truth, string> = { nailed: "-9deg", partly: "6deg", off: "-4deg" };
+const TILT: Record<Truth, number> = { nailed: -9, partly: 6, off: -4 };
 
-type StampSize = "stage" | "lg" | "sm";
+const unit = (value: number): string => `calc(var(--u) * ${value})`;
 
-const SIZE: Record<StampSize, string> = {
-  stage: "border-[calc(var(--u)*0.35)] px-[calc(var(--u)*1.1)] py-[calc(var(--u)*0.45)] text-[calc(var(--u)*3.2)]",
-  lg: "border-[5px] px-4 py-2 text-[clamp(2rem,9vw,3.6rem)]",
-  sm: "border-[3px] px-2 py-1 text-lg",
-};
+type StampSize = "lg" | "sm" | { stageU: number };
 
-type StampProps = { truth: Truth; animate?: boolean; size?: StampSize };
+const SIZE_CLASS = {
+  lg: "border-[5px] px-4 py-2 text-[min(7.5vw,3.6rem)] mix-blend-multiply bg-slip/40",
+  sm: "border-[3px] px-2 py-1 text-lg mix-blend-multiply bg-slip/40",
+} as const;
 
-export function Stamp({ truth, animate = false, size = "lg" }: StampProps) {
+const stageStyle = (sizeU: number): CSSProperties => ({
+  fontSize: unit(sizeU),
+  borderWidth: unit(STAMP_CHROME.borderU),
+  paddingInline: unit(STAMP_CHROME.padXU),
+  paddingBlock: unit(STAMP_CHROME.padYU),
+});
+
+type StampProps = { truth: Truth; animate?: boolean; size?: StampSize; tiltDeg?: number };
+
+export function Stamp({ truth, animate = false, size = "lg", tiltDeg }: StampProps) {
+  const tilt = `${tiltDeg ?? TILT[truth]}deg`;
+  const sizing = typeof size === "string" ? { className: SIZE_CLASS[size], style: {} } : { className: "", style: stageStyle(size.stageU) };
   return (
     <span
       role="img"
       aria-label={`Stamped: ${TRUTH_LABEL[truth]}`}
-      style={{ ["--stamp-tilt" as string]: TILT[truth], rotate: animate ? undefined : TILT[truth] }}
+      data-stamp={truth}
+      style={{ ["--stamp-tilt" as string]: tilt, rotate: animate ? undefined : tilt, ...sizing.style }}
       className={cx(
-        "wide inline-block rounded-lg bg-slip/40 font-black uppercase leading-none mix-blend-multiply",
-        SIZE[size],
+        "wide inline-block rounded-lg font-black whitespace-nowrap uppercase leading-none",
+        sizing.className,
         INK[truth],
         animate && "animate-stamp",
       )}

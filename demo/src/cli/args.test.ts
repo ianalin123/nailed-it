@@ -7,6 +7,7 @@ describe("parseArgs", () => {
       beats: [1, 2, 3, 4, 5, 6, 7, 8],
       mock: false,
       reuseRecording: false,
+      contactSheet: false,
       webPort: 3217,
       roomPort: 8787,
     });
@@ -20,6 +21,10 @@ describe("parseArgs", () => {
 
   it("accepts --beats=1,2 form", () => {
     expect(parseArgs(["--beats=1,2"]).beats).toEqual([1, 2]);
+  });
+
+  it("parses --contact-sheet", () => {
+    expect(parseArgs(["--contact-sheet"]).contactSheet).toBe(true);
   });
 
   it("parses ports and reuse", () => {
