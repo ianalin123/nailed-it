@@ -34,7 +34,17 @@ def _parser() -> argparse.ArgumentParser:
     run2.add_argument("stage", choices=["eval-base", "rl", "eval", "rl-correctness", "eval-correctness", "results"])
     run3 = sub.add_parser("run3", help="run 3: per-read credit assignment with River primitives")
     run3.add_argument("stage", choices=["train", "eval", "results", "blind"])
+    sub.add_parser("confirm", help="confirmation evaluation of run-3 step 5 against base (no training)")
     return parser
+
+
+def _confirm() -> int:
+    import json
+
+    from nailed_it_training.confirm import run_confirmation
+
+    print(json.dumps(run_confirmation(), indent=1, default=str))
+    return 0
 
 
 def _run3(stage: str) -> int:
@@ -128,6 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run2(args.stage)
     if args.command == "run3":
         return _run3(args.stage)
+    if args.command == "confirm":
+        return _confirm()
     raise AssertionError(f"unhandled command {args.command}")
 
 
