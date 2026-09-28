@@ -32,7 +32,18 @@ def _parser() -> argparse.ArgumentParser:
     full.add_argument("stage", choices=["freeze", "stage-a", "sft", "rl-full", "rl-correctness", "eval", "results"])
     run2 = sub.add_parser("run2", help="run 2: RL from base with the distance-weighted reward, resumable stages")
     run2.add_argument("stage", choices=["eval-base", "rl", "eval", "rl-correctness", "eval-correctness", "results"])
+    run3 = sub.add_parser("run3", help="run 3: per-read credit assignment with River primitives")
+    run3.add_argument("stage", choices=["train", "eval", "results", "blind"])
     return parser
+
+
+def _run3(stage: str) -> int:
+    import json
+
+    from nailed_it_training import run3_stages
+
+    print(json.dumps(run3_stages.STAGES[stage](), indent=1, default=str))
+    return 0
 
 
 def _run2(stage: str) -> int:
@@ -115,6 +126,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _full(args.stage)
     if args.command == "run2":
         return _run2(args.stage)
+    if args.command == "run3":
+        return _run3(args.stage)
     raise AssertionError(f"unhandled command {args.command}")
 
 

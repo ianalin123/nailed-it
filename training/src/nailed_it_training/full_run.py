@@ -230,8 +230,8 @@ def stage_freeze() -> dict[str, Any]:
 class Rig:
     """Backend, ledger, verifier, judge and scorer shared by the stages of one process."""
 
-    def __init__(self, category_means: dict[str, float] | None = None, telemetry: Telemetry | None = None) -> None:
-        self.ledger = SpendLedger(cap_usd=CAP_USD, path=LEDGER_PATH)
+    def __init__(self, category_means: dict[str, float] | None = None, telemetry: Telemetry | None = None, cap_usd: float = CAP_USD) -> None:
+        self.ledger = SpendLedger(cap_usd=cap_usd, path=LEDGER_PATH)
         self.backend = RiverBackend.from_env(self.ledger, thinking=False, step_log=FULL_DIR / "river_steps.jsonl")
         self.inner_verifier = LlmVerifier(
             self.backend.llm_client(BASE, max_tokens=3072, label="full:verifier"), batch_size=12, on_ungrounded="reject"

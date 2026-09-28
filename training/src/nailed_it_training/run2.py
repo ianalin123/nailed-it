@@ -9,6 +9,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from nailed_it_training.eval import (
@@ -140,9 +141,9 @@ def _ref(d: dict[str, Any]) -> CheckpointRef:
     return CheckpointRef(training_path=d["training_path"], inference_path=d["inference_path"], base_model=d["base_model"])
 
 
-def _eval_target(rig: Rig, name: str, target: ModelRef, benchmark: FrozenBenchmark) -> dict[str, Any]:
-    RUN2_DIR.mkdir(parents=True, exist_ok=True)
-    samples_path = RUN2_DIR / f"eval_samples_{name}.json"
+def _eval_target(rig: Rig, name: str, target: ModelRef, benchmark: FrozenBenchmark, out_dir: Path = RUN2_DIR) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    samples_path = out_dir / f"eval_samples_{name}.json"
     if samples_path.exists():
         samples: dict[str, list[str]] = json.loads(samples_path.read_text())
     else:
@@ -170,7 +171,7 @@ def _eval_target(rig: Rig, name: str, target: ModelRef, benchmark: FrozenBenchma
     if not decks:
         raise StageError(f"{name}: every completion was malformed")
     metrics = compute_metrics([d for _, d in decks], n_malformed=malformed)
-    (RUN2_DIR / f"eval_decks_{name}.json").write_text(json.dumps([_deck_json(e, d) for e, d in decks]))
+    (out_dir / f"eval_decks_{name}.json").write_text(json.dumps([_deck_json(e, d) for e, d in decks]))
     return asdict(metrics)
 
 
