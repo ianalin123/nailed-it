@@ -14,6 +14,7 @@ export type Verdict = { read: string; truth: Truth };
 
 export const LEARNED_COPY = {
   title: "It just learned.",
+  procedureTitle: "It remembers how it looked.",
   verdictCaption: "Every verdict becomes a training label.",
   counterLabel: "verdicts in the training set",
   procedureCaption: "Memorable keeps how it found out.",
@@ -97,7 +98,7 @@ export const learnedScene = ({ learning, verdict }: { learning: Learning; verdic
     duration,
     stillAt: duration - 0.3,
     render: (t) => `<div class="learned">
-        <h1 class="wide headline" style="font-size:80px;margin:0;${fadeStyle(t, 0)}">${LEARNED_COPY.title}</h1>
+        <h1 class="wide headline" style="font-size:80px;margin:0;${fadeStyle(t, 0)}">${training ? LEARNED_COPY.title : LEARNED_COPY.procedureTitle}</h1>
         <div class="learn-row">${training ? training.render(t) : ""}${procedure ? procedure.render(t) : ""}</div>
       </div>`,
   };

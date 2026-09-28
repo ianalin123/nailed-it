@@ -17,6 +17,19 @@ const horoscope: Horoscope = {
   unit: "bits",
   base: { label: "Base model", read: "You sometimes doubt yourself.", infoGain: 0.02 },
   trained: { label: "Trained reader", read: "You rehearse calls, then improvise.", infoGain: 1.4 },
+  difference: null,
+  caveat: null,
+  sampleNote: null,
+};
+
+const measured: Horoscope = {
+  evidenceNote: null,
+  unit: "nats",
+  base: { label: "Base model, untrained", read: null, infoGain: 0.054 },
+  trained: { label: "Nailed It reader, step 5", read: null, infoGain: 0.169 },
+  difference: { value: 0.114, ciLow: 0.001, ciHigh: 0.227, level: 95 },
+  caveat: "Small gain. The 95% interval only just clears zero.",
+  sampleNote: "40 decks per reader",
 };
 
 const learning: Learning = {
@@ -49,6 +62,7 @@ const allScenes = (): Scene[] => [
   coldOpenScene({ read: "You name files final_v3_REAL.pdf." }),
   scanScene(scan),
   horoscopeScene(horoscope),
+  horoscopeScene(measured),
   learnedScene({ learning, verdict }),
   closeScene(),
 ];
@@ -195,5 +209,136 @@ describe("beat 6 spotlight", () => {
     const html = chainOverlay("real", { x: 1090, y: 84, width: 806, height: 807 });
     expect(html).toMatch(/data-spotlight[^>]*left:1090px;top:84px;width:806px;height:807px/);
     expect(html).toContain("box-shadow");
+  });
+});
+
+describe("horoscope test, numbers only", () => {
+  const scene = horoscopeScene(measured);
+  const html = end(scene);
+
+  it("uses a neutral headline and no horoscope framing when there are no reads", () => {
+    expect(html).toContain("Did training help?");
+    expect(html).not.toContain("The horoscope test");
+    expect(html).not.toContain("fits everyone");
+  });
+
+  it("closes on the measured, modest line for an interval that clears zero", () => {
+    expect(html).toContain("A small gain. Measured on data it never saw.");
+  });
+
+  it("does not claim a gain when the interval includes zero", () => {
+    const flat = end(horoscopeScene({ ...measured, difference: { value: 0.05, ciLow: -0.02, ciHigh: 0.12, level: 95 }, trained: { ...measured.trained, infoGain: 0.104 } }));
+    expect(flat).not.toContain("A small gain");
+    expect(flat).toContain("No clear gain. Measured on data it never saw.");
+  });
+
+  it("labels both bars with the reader name and the value at full precision", () => {
+    expect(html).toContain("Base model, untrained");
+    expect(html).toContain("Nailed It reader, step 5");
+    expect(html).toContain("0.054 nats");
+    expect(html).toContain("0.169 nats");
+    expect(html.match(/data-bar=/g)).toHaveLength(2);
+  });
+
+  it("draws the interval with a zero line and states it in words", () => {
+    expect(html).toContain("data-interval");
+    expect(html).toContain("data-zero-line");
+    expect(html).toContain("Difference +0.114 nats. 95% interval +0.001 to +0.227.");
+  });
+
+  it("puts the zero label above the axis so it cannot collide with a lower bound next to zero", () => {
+    expect(html).toMatch(/<text[^>]*y="28"[^>]*class="zero-label"/);
+    expect(html).toMatch(/<text[^>]*y="118"[^>]*>\+0\.001</);
+  });
+
+  it("shows the caveat in plain type for the whole beat", () => {
+    for (const t of [0.05, scene.duration / 2, scene.duration]) {
+      expect(scene.render(t)).toContain("Small gain. The 95% interval only just clears zero.");
+    }
+    expect(html).toMatch(/data-caveat[^>]*font-size:(3\d|4\d)px/);
+  });
+
+  it("shows the sample note", () => {
+    expect(html).toContain("40 decks per reader");
+  });
+
+  it("never lets a bar grow past its true length", () => {
+    const widths = (markup: string): number[] =>
+      [...markup.matchAll(/data-bar="[a-z]+"[^>]*data-width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    const final = widths(html);
+    for (let t = 0; t <= scene.duration; t += 0.1) {
+      widths(scene.render(t)).forEach((w, i) => expect(w).toBeLessThanOrEqual((final[i] ?? 0) + 1e-6));
+    }
+  });
+
+  it("falls back to numbers only when just one read is present", () => {
+    const one = end(horoscopeScene({ ...measured, base: { ...measured.base, read: "A read." } }));
+    expect(one).toContain("Did training help?");
+    expect(one).not.toContain("A read.");
+  });
+});
+
+describe("horoscope test with reads and an interval", () => {
+  const html = end(horoscopeScene({ ...horoscope, difference: { value: 1.38, ciLow: 0.5, ciHigh: 2.1, level: 95 }, caveat: "One run." }));
+
+  it("keeps the horoscope headline and still draws the interval, never bare bars", () => {
+    expect(html).toContain("The horoscope test");
+    expect(html).toContain("data-interval");
+    expect(html).toContain("data-zero-line");
+  });
+
+  it("shows the caveat", () => {
+    expect(html).toContain("One run.");
+  });
+
+  it("uses one shared scale for both bars", () => {
+    expect(html).toMatch(/data-bar="base"[^>]*data-scale="([\d.]+)"[\s\S]*data-bar="trained"[^>]*data-scale="\1"/);
+  });
+});
+
+describe("any horoscope layout with a difference shows the interval", () => {
+  it("holds for every combination of reads", () => {
+    const d = { value: 0.114, ciLow: 0.001, ciHigh: 0.227, level: 95 as const };
+    for (const reads of [[null, null], ["a", "b"], ["a", null]] as const) {
+      const html = end(
+        horoscopeScene({ ...measured, difference: d, base: { ...measured.base, read: reads[0] }, trained: { ...measured.trained, read: reads[1] } }),
+      );
+      expect(html).toContain("data-interval");
+    }
+  });
+});
+
+describe("beat 7 combinations", () => {
+  const procedureOnly = { trainingSet: null, procedure: learning.procedure, recall: null };
+
+  it("procedure only: no learning or recall claims", () => {
+    const html = end(learnedScene({ learning: procedureOnly, verdict }));
+    expect(html).toContain("It remembers how it looked.");
+    expect(html).toContain("Stored in Memorable");
+    expect(html).toContain("Memorable keeps how it found out.");
+    expect(html).not.toContain("It just learned");
+    expect(html).not.toContain("training label");
+    expect(html).not.toContain("Recalled");
+    expect(html).not.toContain(verdict.read);
+  });
+
+  it("training set only: the learning headline and the verdict drop, no procedure", () => {
+    const html = end(learnedScene({ learning: { trainingSet: learning.trainingSet, procedure: null, recall: null }, verdict }));
+    expect(html).toContain("It just learned.");
+    expect(html).toContain("Every verdict becomes a training label.");
+    expect(html).not.toContain("Memorable");
+  });
+
+  it("training set and procedure: both, with the learning headline", () => {
+    const html = end(learnedScene({ learning: { ...learning, recall: null }, verdict }));
+    expect(html).toContain("It just learned.");
+    expect(html).toContain("Stored in Memorable");
+    expect(html).not.toContain("Recalled");
+  });
+
+  it("recall appears only when recall data is present", () => {
+    expect(end(learnedScene({ learning: { ...procedureOnly, recall: { nextPlayer: "Ada", stepsWithout: null, stepsWith: null } }, verdict }))).toContain(
+      "Recalled for Ada's scan",
+    );
   });
 });

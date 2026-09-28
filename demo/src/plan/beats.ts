@@ -26,10 +26,20 @@ export type BeatPlan = { beats: BeatId[]; omitted: Omission[] };
 const hasLearningContent = (learning: NonNullable<Results["learning"]>): boolean =>
   learning.trainingSet !== null || learning.procedure !== null;
 
+const hasHoroscopeContent = (test: NonNullable<Results["horoscopeTest"]>): boolean =>
+  (test.base.read !== null && test.trained.read !== null) ||
+  test.base.infoGain !== null ||
+  test.trained.infoGain !== null ||
+  test.difference !== null;
+
 const resultOmission = (beat: BeatId, load: ResultsLoad): string | undefined => {
   if (beat !== 4 && beat !== 7) return undefined;
   if (load.kind === "missing") return `${load.path} does not exist, so there are no measured results to show`;
-  if (beat === 4 && load.results.horoscopeTest === null) return "results.json has horoscopeTest: null";
+  if (beat === 4) {
+    const test = load.results.horoscopeTest;
+    if (test === null) return "results.json has horoscopeTest: null";
+    if (!hasHoroscopeContent(test)) return "results.json horoscopeTest has nothing to show: no reads, no gains, no difference";
+  }
   if (beat === 7) {
     const learning = load.results.learning;
     if (learning === null) return "results.json has learning: null";

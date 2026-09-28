@@ -8,6 +8,9 @@ const full: Results = {
     unit: "bits",
     base: { label: "Base model", read: "You sometimes doubt yourself.", infoGain: 0.02 },
     trained: { label: "Trained reader", read: "You rehearse calls and then improvise.", infoGain: 1.1 },
+    difference: null,
+    caveat: null,
+    sampleNote: null,
   },
   learning: {
     trainingSet: { before: 40, after: 41 },
@@ -33,6 +36,20 @@ describe("planBeats", () => {
 
   it("omits beat 4 when the horoscope test is null", () => {
     expect(planBeats(ALL_BEATS, loaded({ ...full, horoscopeTest: null })).beats).not.toContain(4);
+  });
+
+  it("keeps beat 4 with no reads when there are numbers to show", () => {
+    const test = full.horoscopeTest!;
+    const numbers = { ...test, base: { ...test.base, read: null }, trained: { ...test.trained, read: null } };
+    expect(planBeats(ALL_BEATS, loaded({ ...full, horoscopeTest: numbers })).beats).toContain(4);
+  });
+
+  it("omits beat 4 when there are neither reads, gains nor a difference", () => {
+    const test = full.horoscopeTest!;
+    const empty = { ...test, base: { ...test.base, read: null, infoGain: null }, trained: { ...test.trained, read: null, infoGain: null } };
+    const plan = planBeats(ALL_BEATS, loaded({ ...full, horoscopeTest: empty }));
+    expect(plan.beats).not.toContain(4);
+    expect(plan.omitted.find((o) => o.beat === 4)?.reason).toMatch(/nothing to show/);
   });
 
   it("omits beat 7 when learning is null", () => {

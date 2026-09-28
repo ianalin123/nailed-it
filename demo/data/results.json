@@ -1,0 +1,25 @@
+{
+  "horoscopeTest": {
+    "evidenceNote": "New held-out data.",
+    "unit": "nats",
+    "base": { "label": "Base model, untrained", "read": null, "infoGain": 0.054 },
+    "trained": { "label": "Nailed It reader, step 5", "read": null, "infoGain": 0.169 },
+    "difference": { "value": 0.114, "ciLow": 0.001, "ciHigh": 0.227, "level": 95 },
+    "caveat": "Small gain. The 95% interval only just clears zero.",
+    "sampleNote": "40 new decks per reader"
+  },
+  "learning": {
+    "trainingSet": null,
+    "procedure": {
+      "title": "Investigate a person from their own files",
+      "steps": [
+        "List memory notes by date",
+        "Pull the owner's own prompts from sessions",
+        "Count patterns by month, hour and weekday",
+        "Read git history for each repo",
+        "Validate the digest and flag anything private"
+      ]
+    },
+    "recall": null
+  }
+}

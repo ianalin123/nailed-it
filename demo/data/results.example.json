@@ -1,17 +1,20 @@
 {
   "horoscopeTest": {
-    "evidenceNote": "PLACEHOLDER: describe the shared evidence, e.g. how many items",
-    "unit": "bits",
+    "evidenceNote": "PLACEHOLDER: what data both readers were scored on",
+    "unit": "nats",
     "base": {
-      "label": "PLACEHOLDER base model name",
-      "read": "PLACEHOLDER: the base model's read on the held-out evidence",
-      "infoGain": 999
+      "label": "PLACEHOLDER base model",
+      "read": "PLACEHOLDER: an example read, or null to use the numbers-only layout",
+      "infoGain": 111
     },
     "trained": {
-      "label": "PLACEHOLDER trained reader name",
-      "read": "PLACEHOLDER: the trained reader's read on the same evidence",
+      "label": "PLACEHOLDER trained reader",
+      "read": "PLACEHOLDER: an example read, or null to use the numbers-only layout",
       "infoGain": 999
-    }
+    },
+    "difference": { "value": 888, "ciLow": 777, "ciHigh": 999, "level": 95 },
+    "caveat": "PLACEHOLDER: one plain sentence on how strong the result is",
+    "sampleNote": "PLACEHOLDER: sample size"
   },
   "learning": {
     "trainingSet": { "before": 99999, "after": 100000 },

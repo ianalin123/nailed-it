@@ -74,6 +74,19 @@ body.transparent { background: transparent; }
 .gain-zero { position: absolute; top: -6px; bottom: -6px; width: 3px; background: var(--slip); }
 .gain-fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
 .gain-value { font-weight: 900; font-stretch: 125%; font-size: 40px; }
+.caveat { margin: 22px 0 0; font-weight: 600; color: #fff; line-height: 1.2; }
+.note { margin-left: 14px; }
+.numbers-bars { margin-top: 44px; display: flex; flex-direction: column; gap: 16px; }
+.number-row { display: grid; grid-template-columns: 380px 1000px auto; align-items: center; column-gap: 28px; }
+.row-label { font-size: 30px; }
+.axis-labels { position: relative; height: 30px; }
+.axis-labels span { position: absolute; top: 0; transform: translateX(-50%); font-family: "Courier Prime", monospace; font-size: 22px; color: var(--soft); white-space: nowrap; }
+.interval { margin-top: 40px; }
+.interval-svg { display: block; overflow: visible; }
+.interval-svg text { fill: var(--slip); font-family: "Courier Prime", monospace; font-size: 24px; }
+.interval-svg .point-label { font-weight: 700; font-size: 28px; }
+.interval-svg .zero-label { fill: var(--soft); }
+.interval-words { margin: 10px 0 0; font-size: 32px; font-weight: 700; }
 .learned { position: absolute; inset: 0; padding: 80px 110px; display: flex; flex-direction: column; gap: 40px; }
 .learn-row { display: flex; gap: 80px; justify-content: center; align-items: flex-start; flex: 1; }
 .learn-block { flex: 1; max-width: 780px; display: flex; flex-direction: column; gap: 22px; align-items: center; position: relative; }

@@ -11,16 +11,57 @@ const text = (max: number) => z.string().trim().min(1).max(max);
 
 const Reader = z.object({
   label: text(40),
-  read: text(240),
+  read: text(240).nullable().default(null),
   infoGain: z.number().finite().nullable().default(null),
 });
 
-const HoroscopeTest = z.object({
-  evidenceNote: text(80).nullable().default(null),
-  unit: z.enum(["bits", "nats"]),
-  base: Reader,
-  trained: Reader,
+const Difference = z.object({
+  value: z.number().finite(),
+  ciLow: z.number().finite(),
+  ciHigh: z.number().finite(),
+  level: z.literal(95),
 });
+
+const decimalsOf = (n: number): number => {
+  const text = String(n);
+  if (text.includes("e")) return 6;
+  const dot = text.indexOf(".");
+  return dot < 0 ? 0 : text.length - dot - 1;
+};
+
+const roundingSlack = (...values: number[]): number => values.reduce((sum, v) => sum + 0.5 * 10 ** -decimalsOf(v), 0) + 1e-9;
+
+const HoroscopeTest = z
+  .object({
+    evidenceNote: text(80).nullable().default(null),
+    unit: z.enum(["bits", "nats"]),
+    base: Reader,
+    trained: Reader,
+    difference: Difference.nullable().default(null),
+    caveat: text(90).nullable().default(null),
+    sampleNote: text(60).nullable().default(null),
+  })
+  .superRefine((test, ctx) => {
+    const d = test.difference;
+    if (d === null) return;
+    if (d.ciLow > d.value) {
+      ctx.addIssue({ code: "custom", path: ["difference", "ciLow"], message: `difference.ciLow (${d.ciLow}) is above difference.value (${d.value})` });
+    }
+    if (d.value > d.ciHigh) {
+      ctx.addIssue({ code: "custom", path: ["difference", "value"], message: `difference.value (${d.value}) is above difference.ciHigh (${d.ciHigh})` });
+    }
+    const base = test.base.infoGain;
+    const trained = test.trained.infoGain;
+    if (base === null || trained === null) return;
+    const implied = trained - base;
+    if (Math.abs(implied - d.value) > roundingSlack(base, trained, d.value)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["difference", "value"],
+        message: `trained minus base is ${Number(implied.toFixed(6))} (${trained} - ${base}), but difference.value is ${d.value}. They disagree by more than rounding.`,
+      });
+    }
+  });
 
 const TrainingSet = z
   .object({ before: z.number().int().min(0), after: z.number().int().min(0) })
