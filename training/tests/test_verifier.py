@@ -7,7 +7,9 @@ from nailed_it_training.protocol import EvidenceItem, SourceKind
 from nailed_it_training.verifier import (
     CachingVerifier,
     KeywordVerifier,
+    LlmCallError,
     LlmVerifier,
+    OverCitedVerdictError,
     TraitRule,
     UngroundedVerdictError,
     VerdictLabel,
@@ -15,6 +17,7 @@ from nailed_it_training.verifier import (
     build_verifier_prompt,
     detect_restatement,
     evidence_set_hash,
+    select_relevant,
 )
 
 HIDDEN = [
@@ -201,3 +204,131 @@ class TestRejectionMode:
     def test_unknown_mode_is_an_error(self) -> None:
         with pytest.raises(ValueError):
             LlmVerifier(ScriptedClient("{}"), on_ungrounded="ignore")  # type: ignore[arg-type]
+
+
+class TestStrictness:
+    def test_more_than_three_citations_is_rejected(self) -> None:
+        hidden = [EvidenceItem(id=f"h{i}", source=SourceKind.OTHER, text=f"item {i}") for i in range(6)]
+        client = ScriptedClient(reply("supported", ["h0", "h1", "h2", "h3"]))
+        with pytest.raises(OverCitedVerdictError):
+            LlmVerifier(client).verify("x", hidden)
+
+    def test_over_citation_in_reject_mode_becomes_unverifiable(self) -> None:
+        hidden = [EvidenceItem(id=f"h{i}", source=SourceKind.OTHER, text=f"item {i}") for i in range(6)]
+        client = ScriptedClient(reply("supported", ["h0", "h1", "h2", "h3"]))
+        verifier = LlmVerifier(client, on_ungrounded="reject")
+        assert verifier.verify("x", hidden).label is VerdictLabel.UNVERIFIABLE
+        assert verifier.stats.rejected == 1
+
+    def test_three_citations_are_fine(self) -> None:
+        hidden = [EvidenceItem(id=f"h{i}", source=SourceKind.OTHER, text=f"item {i}") for i in range(6)]
+        client = ScriptedClient(reply("supported", ["h0", "h1", "h2"]))
+        assert LlmVerifier(client).verify("x", hidden).label is VerdictLabel.SUPPORTED
+
+    def test_prompt_states_the_strict_contract(self) -> None:
+        system, _ = build_verifier_prompt(["claim"], HIDDEN)
+        lowered = system.lower()
+        assert "at most 3" in lowered
+        assert "surprising" in lowered
+        assert "compatible" in lowered
+
+
+class TestRelevanceSelection:
+    def pool(self, prefix: str, texts: list[str]) -> list[EvidenceItem]:
+        return [EvidenceItem(id=f"{prefix}{i}", source=SourceKind.OTHER, text=t) for i, t in enumerate(texts)]
+
+    def test_returns_pool_unchanged_when_small(self) -> None:
+        pool = self.pool("h", ["a", "b"])
+        assert select_relevant(["claim"], pool, k=80) == pool
+
+    def test_prefers_items_sharing_words_with_the_claims(self) -> None:
+        pool = self.pool("h", ["weather report", "sea swim at dawn", "tax forms", "cold sea swim again", "lunch"])
+        chosen = select_relevant(["You love a sea swim."], pool, k=2)
+        assert {i.id for i in chosen} == {"h1", "h3"}
+
+    def test_round_robin_gives_every_claim_its_best_items(self) -> None:
+        pool = self.pool("h", ["cello lesson", "cello rosin", "cello strings", "marathon bib", "dog vet"])
+        chosen = select_relevant(["You play the cello.", "You run a marathon."], pool, k=2)
+        assert {i.id for i in chosen} == {"h0", "h3"}
+
+    def test_is_deterministic_and_order_preserving(self) -> None:
+        pool = self.pool("h", [f"word{i % 7} filler" for i in range(200)])
+        a = select_relevant(["word3 word5"], pool, k=80)
+        assert a == select_relevant(["word3 word5"], pool, k=80)
+        assert len(a) == 80
+        idx = [pool.index(i) for i in a]
+        assert idx == sorted(idx)
+
+    def test_selection_draws_only_from_the_hidden_pool_never_visible(self) -> None:
+        from nailed_it_training.episodes import SplitConfig, build_episodes
+        from nailed_it_training.synthetic import generate_personas
+
+        digest = generate_personas(1, seed=3)[0].digest
+        for episode in build_episodes(digest, SplitConfig(), seed=0):
+            claims = [item.text for item in episode.visible[:5]]
+            chosen = select_relevant(claims, episode.hidden, k=5)
+            ids = {i.id for i in chosen}
+            assert ids <= {i.id for i in episode.hidden}
+            assert not ids & episode.visible_ids
+
+
+class SequenceClient:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = replies
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls += 1
+        return self.replies[min(self.calls - 1, len(self.replies) - 1)]
+
+
+class TestBatchFailures:
+    def test_reject_mode_retries_a_malformed_batch_once(self) -> None:
+        client = SequenceClient(["garbage", reply("supported", ["h1"])])
+        verifier = LlmVerifier(client, on_ungrounded="reject")
+        assert verifier.verify("x", HIDDEN).label is VerdictLabel.SUPPORTED
+        assert client.calls == 2 and verifier.stats.retries == 1
+
+    def test_reject_mode_gives_up_after_one_retry_and_counts_it(self) -> None:
+        client = SequenceClient(["garbage", "still garbage"])
+        verifier = LlmVerifier(client, on_ungrounded="reject")
+        verdicts = verifier.verify_many(["a", "b"], HIDDEN)
+        assert [v.label for v in verdicts] == [VerdictLabel.UNVERIFIABLE] * 2
+        assert all(v.rationale.startswith("rejected batch") for v in verdicts)
+        assert client.calls == 2 and verifier.stats.rejected_batches == 1
+
+    def test_raise_mode_does_not_retry(self) -> None:
+        client = SequenceClient(["garbage", reply("supported", ["h1"])])
+        with pytest.raises(VerifierResponseError):
+            LlmVerifier(client).verify("x", HIDDEN)
+        assert client.calls == 1
+
+
+class FailingThenGood:
+    def __init__(self, good: str, failures: int) -> None:
+        self.good = good
+        self.failures = failures
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise LlmCallError("timed out")
+        return self.good
+
+
+class TestCallFailures:
+    def test_reject_mode_retries_a_failed_call(self) -> None:
+        client = FailingThenGood(reply("supported", ["h1"]), failures=1)
+        verifier = LlmVerifier(client, on_ungrounded="reject")
+        assert verifier.verify("x", HIDDEN).label is VerdictLabel.SUPPORTED
+        assert verifier.stats.retries == 1
+
+    def test_reject_mode_marks_batch_unverifiable_after_two_failures(self) -> None:
+        verifier = LlmVerifier(FailingThenGood("", failures=5), on_ungrounded="reject")
+        assert verifier.verify("x", HIDDEN).label is VerdictLabel.UNVERIFIABLE
+        assert verifier.stats.rejected_batches == 1
+
+    def test_raise_mode_propagates_call_errors(self) -> None:
+        with pytest.raises(LlmCallError):
+            LlmVerifier(FailingThenGood("", failures=1)).verify("x", HIDDEN)

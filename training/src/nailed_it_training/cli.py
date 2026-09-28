@@ -27,8 +27,19 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--rl-steps", type=int, default=20)
     demo.add_argument("--with-verdicts", action="store_true", help="also audit the verifier and train a critic on synthetic verdicts")
     smoke = sub.add_parser("smoke", help="first real River calls under the $5 wave cap (needs RIVER_API_KEY in the environment)")
-    smoke.add_argument("step", choices=["a", "b", "c"])
+    smoke.add_argument("step", choices=["a", "b", "c", "calibrate"])
+    full = sub.add_parser("full", help="the first full training run, one resumable stage at a time")
+    full.add_argument("stage", choices=["freeze", "stage-a", "sft", "rl-full", "rl-correctness", "eval", "results"])
     return parser
+
+
+def _full(stage: str) -> int:
+    import json
+
+    from nailed_it_training import full_run
+
+    print(json.dumps(full_run.STAGES[stage](), indent=1, default=str))
+    return 0
 
 
 def _smoke(step: str) -> int:
@@ -36,7 +47,7 @@ def _smoke(step: str) -> int:
 
     from nailed_it_training import smoke
 
-    runner = {"a": smoke.step_a, "b": smoke.step_b, "c": smoke.step_c}[step]
+    runner = {"a": smoke.step_a, "b": smoke.step_b, "c": smoke.step_c, "calibrate": smoke.step_calibrate}[step]
     print(json.dumps(runner(), indent=1, default=str))
     return 0
 
@@ -50,6 +61,7 @@ def _demo(args: argparse.Namespace) -> int:
         PipelineConfig(),
         seed=args.seed,
         heldout_digest_ids=frozenset(d.digest_id for d in digests[-2:]),
+        teacher_decks_per_episode=8,
         sft_steps=args.sft_steps,
         rl_steps=args.rl_steps,
     )
@@ -88,6 +100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _demo(args)
     if args.command == "smoke":
         return _smoke(args.step)
+    if args.command == "full":
+        return _full(args.stage)
     raise AssertionError(f"unhandled command {args.command}")
 
 

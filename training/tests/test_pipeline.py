@@ -19,6 +19,7 @@ from nailed_it_training.pipeline import (
     freeze_benchmark,
     hold_out_time_window,
     run_pipeline,
+    split_digests,
     verify_frozen,
 )
 from nailed_it_training.reward import Gate
@@ -28,7 +29,9 @@ from nailed_it_training.verifier import CachingVerifier, KeywordVerifier
 PEOPLE = generate_personas(10, seed=0)
 DIGESTS = [p.digest for p in PEOPLE]
 HELD_OUT = frozenset(d.digest_id for d in DIGESTS[8:])
-SMALL = PipelineConfig(seed=0, heldout_digest_ids=HELD_OUT, rl_steps=6, sft_steps=5, group_size=4, groups_per_step=4)
+SMALL = PipelineConfig(
+    seed=0, heldout_digest_ids=HELD_OUT, rl_steps=6, sft_steps=5, group_size=4, groups_per_step=4, teacher_decks_per_episode=8
+)
 
 
 def run(config: PipelineConfig = SMALL, verdicts=None, digests=DIGESTS, verifier=None):
@@ -116,12 +119,12 @@ class TestBenchmark:
             assert_no_leakage(freeze_benchmark(episodes[:1]), episodes)
 
 
-def test_single_person_run_uses_only_a_held_out_time_window() -> None:
-    config = PipelineConfig(seed=0, rl_steps=2, sft_steps=2, group_size=2, groups_per_step=2, teacher_decks_per_episode=8, min_survivors=1)
-    out = run(config, digests=DIGESTS[:1])
-    assert out.benchmark_digest_ids == frozenset()
-    assert out.training_digest_ids == {DIGESTS[0].digest_id}
-    assert set(out.metrics) == set(ABLATION_ROWS)
+def test_single_person_split_uses_only_a_held_out_time_window() -> None:
+    training_digests, training_episodes, benchmark, held_out = split_digests(DIGESTS[:1], PipelineConfig(seed=0))
+    assert held_out == frozenset()
+    assert [d.digest_id for d in training_digests] == [DIGESTS[0].digest_id]
+    assert len(benchmark.episodes) == 1
+    assert_no_leakage(benchmark, training_episodes)
 
 
 def test_verifier_calls_are_cached_across_stages() -> None:
@@ -137,7 +140,7 @@ def test_pipeline_module_does_not_import_synthetic_data() -> None:
 
 
 def test_stage_a_starvation_is_a_named_error() -> None:
-    config = PipelineConfig(seed=0, rl_steps=1, sft_steps=1, group_size=2, groups_per_step=1, teacher_decks_per_episode=1, min_survivors=12)
+    config = PipelineConfig(seed=0, rl_steps=1, sft_steps=1, group_size=2, groups_per_step=1, teacher_decks_per_episode=1)
     with pytest.raises(StageAStarvedError):
         run(config, digests=DIGESTS[:1])
 

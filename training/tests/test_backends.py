@@ -218,3 +218,76 @@ class TestRiverLedger:
         backend, _ = stub_backend(SpendLedger(cap_usd=5.0), StubSample("x"))
         with pytest.raises(UnconfirmedRiverFeature):
             backend.sample(Endpoint("https://x", "m"), system="s", user="u", n=1, max_tokens=8, temperature=0.0, seed=0)
+
+
+class TimeoutClient:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, object] = {}
+
+    def sample(self, prompt: str, **kwargs: object) -> list[StubSample]:
+        from river_client.types import RiverTimeoutError
+
+        self.kwargs = kwargs
+        raise RiverTimeoutError("request timed out")
+
+
+def test_river_timeouts_become_llm_call_errors_and_carry_a_timeout() -> None:
+    from nailed_it_training.verifier import LlmCallError
+
+    ledger = SpendLedger(cap_usd=5.0)
+    backend, _ = stub_backend(ledger, StubSample("x"))
+    client = TimeoutClient()
+    backend._client = client
+    with pytest.raises(LlmCallError):
+        backend.llm_client(BASE, max_tokens=64, label="verifier").complete("s", "u")
+    assert client.kwargs["timeout"] == 180.0
+    assert ledger.spent == 0.0
+
+
+class ChunkedRenderer(StubRenderer):
+    class _Example:
+        def to_dict(self) -> dict[str, object]:
+            return {"model_input": [{"type": "text", "tokens": [1, 2, 3]}], "weights": [0.0, 1.0, 1.0]}
+
+    def build_training_example(self, messages: list[dict[str, str]]) -> "ChunkedRenderer._Example":
+        return self._Example()
+
+
+class RecordingSession:
+    def __init__(self) -> None:
+        self.batches: list[list[dict[str, object]]] = []
+
+    def __enter__(self) -> "RecordingSession":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def create_model(self, **kwargs: object) -> "RecordingSession":
+        return self
+
+    def forward_backward(self, batch: list[dict[str, object]], loss_fn: str) -> None:
+        self.batches.append(batch)
+
+    def optim_step(self, lr: float, grad_clip_norm: float) -> None:
+        return None
+
+    def save_weights(self, name: str, mode: str) -> object:
+        return type("Ckpt", (), {"path": f"river://x/{mode}/{name}"})()
+
+
+def test_sft_accepts_chunked_training_examples_and_meters_tokens() -> None:
+    from nailed_it_training.river_adapter import SftConfig, SftExample
+
+    ledger = SpendLedger(cap_usd=5.0)
+    backend, _ = stub_backend(ledger, StubSample("x"))
+    backend._renderers = {BASE: ChunkedRenderer()}
+    session = RecordingSession()
+    backend._client = type("C", (), {"session": lambda self, **kw: session})()
+    backend._river = type("R", (), {"LoraConfig": lambda self=None, **kw: kw})()
+    backend._datasets = {}
+    handle = backend.upload_dataset("d", [SftExample("s", "u", "c")] * 3)
+    ckpt = backend.start_sft(handle, SftConfig(name="n", base_model=BASE, steps=2, batch_size=2))
+    assert len(session.batches) == 2
+    assert ledger.totals()["training_tokens"] == 2 * 2 * 3
+    assert ckpt.inference_path == "river://x/inference/n-inference"

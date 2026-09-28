@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from nailed_it_training.ledger import SpendCapExceeded, SpendLedger, Usage, estimate_tokens
+from nailed_it_training.verifier import LlmCallError
 
 RIVER_API_KEY_ENV = "RIVER_API_KEY"
 
@@ -30,8 +31,29 @@ class UnconfirmedRiverFeature(NotImplementedError):
     pass
 
 
-class TruncatedResponseError(RuntimeError):
+class TruncatedResponseError(LlmCallError):
     pass
+
+
+class StopTraining(Exception):
+    """Raised by a step hook to end an RL run early. The backend saves final weights and records the reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class StepInfo:
+    run: str
+    n: int
+    model_step: int
+    river_metrics: dict[str, Any]
+    usage: dict[str, int]
+    cost_usd: float
+
+
+StepHook = Callable[[StepInfo], None]
 
 
 @dataclass(frozen=True)
@@ -98,6 +120,7 @@ class RlConfig:
     temperature: float = 1.0
     seed: int = 0
     init_checkpoint: CheckpointRef | None = None
+    checkpoint_every: int | None = None
 
 
 RewardFn = Callable[[RlRow, str], float]
@@ -109,7 +132,9 @@ class TrainerBackend(Protocol):
 
     def start_sft(self, dataset: DatasetHandle, config: SftConfig) -> CheckpointRef: ...
 
-    def run_rl(self, rows: Sequence[RlRow], reward_fn: RewardFn, config: RlConfig) -> CheckpointRef: ...
+    def run_rl(
+        self, rows: Sequence[RlRow], reward_fn: RewardFn, config: RlConfig, on_step: StepHook | None = None
+    ) -> CheckpointRef: ...
 
     def deploy(self, checkpoint: CheckpointRef) -> Endpoint: ...
 
@@ -187,18 +212,39 @@ class RiverBackend:
         completion = sum(len(s.tokens) for s in samples)
         self._ledger.record(Usage(model, label, prompt_tokens=prompt_tokens, cached_prompt_tokens=cached, completion_tokens=completion))
 
-    def sample_raw(self, target: "ModelRef", prompt: str, *, n: int, max_tokens: int, temperature: float, seed: int, label: str) -> list[Any]:
-        """One River sampling call on a rendered prompt. Returns River Sample objects (text, tokens, stop_reason, ...)."""
+    def sample_raw(
+        self,
+        target: "ModelRef",
+        prompt: str,
+        *,
+        n: int,
+        max_tokens: int,
+        temperature: float,
+        seed: int,
+        label: str,
+        timeout: float | None = None,
+    ) -> list[Any]:
+        """One River sampling call on a rendered prompt. Returns River Sample objects (text, tokens, stop_reason, ...).
+
+        A timeout bounds each call (no hang was actually observed). River timeout and connection errors
+        become LlmCallError; nothing is recorded in the ledger for a failed call because no token counts come back."""
         self._ledger.check(Usage(target.base_model, label, prompt_tokens=estimate_tokens(prompt) * n, completion_tokens=max_tokens * n))
         stop = self.renderer(target.base_model).get_stop_strings()
-        kwargs = {"num_samples": n, "max_tokens": max_tokens, "temperature": temperature, "seed": seed, "stop": stop}
-        if target.checkpoint is None:
-            samples = list(self._client.sample(prompt, base_model=target.base_model, **kwargs))
-        else:
-            checkpoint = target.checkpoint.inference_path or target.checkpoint.training_path
-            with self._client.session() as session:
-                groups = session.sample(prompt, base_model=target.base_model, checkpoint=checkpoint, **kwargs)
-            samples = list(groups[0])
+        kwargs: dict[str, Any] = {"num_samples": n, "max_tokens": max_tokens, "temperature": temperature, "seed": seed, "stop": stop}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        from river_client.types import RiverConnectionError, RiverTimeoutError
+
+        try:
+            if target.checkpoint is None:
+                samples = list(self._client.sample(prompt, base_model=target.base_model, **kwargs))
+            else:
+                checkpoint = target.checkpoint.inference_path or target.checkpoint.training_path
+                with self._client.session() as session:
+                    groups = session.sample(prompt, base_model=target.base_model, checkpoint=checkpoint, **kwargs)
+                samples = list(groups[0])
+        except (RiverTimeoutError, RiverConnectionError) as err:
+            raise LlmCallError(f"{label}: {type(err).__name__}: {err}") from err
         self._record_samples(target.base_model, label, prompt, samples)
         return samples
 
@@ -228,7 +274,7 @@ class RiverBackend:
             raise KeyError(f"dataset {dataset.name!r} was not staged with upload_dataset")
         data = [self._sft_datum(config.base_model, ex) for ex in examples]
         batches = [(data[(s * config.batch_size) % len(data) :] + data)[: config.batch_size] for s in range(config.steps)]
-        step_tokens = [sum(len(d["input_ids"]) for d in b) for b in batches]
+        step_tokens = [sum(len(d["weights"]) for d in b) for b in batches]
         self._ledger.check(Usage(config.base_model, f"sft:{config.name}", training_tokens=sum(step_tokens)))
         river = self._river
         with self._client.session(project=config.name) as session:
@@ -254,7 +300,9 @@ class RiverBackend:
             training_tokens=rollouts * (prompt + config.max_generated_tokens),
         )
 
-    def run_rl(self, rows: Sequence[RlRow], reward_fn: RewardFn, config: RlConfig) -> CheckpointRef:
+    def run_rl(
+        self, rows: Sequence[RlRow], reward_fn: RewardFn, config: RlConfig, on_step: StepHook | None = None
+    ) -> CheckpointRef:
         """GRPO-style group centering with the CISPO loss, via river_client.rl (docs.river.ai/guides/rl-sync/).
 
         The whole run's worst case is checked against the cap before it starts. Each step's trajectories are
@@ -281,22 +329,33 @@ class RiverBackend:
                 completion = get_text_content(traj.messages[-1])
                 return float(await asyncio.to_thread(reward_fn, by_id[row["row_id"]], completion))
 
-        def on_step(step: Any) -> None:
+        model_holder: list[Any] = []
+
+        def river_on_step(step: Any) -> None:
             generated = sum(t.generated_tokens for t in step.trajectories)
             context = sum(t.context_tokens for t in step.trajectories)
-            ledger.record(Usage(config.base_model, label, prompt_tokens=context - generated, completion_tokens=generated, training_tokens=context))
+            usage = Usage(config.base_model, label, prompt_tokens=context - generated, completion_tokens=generated, training_tokens=context)
+            cost = ledger.record(usage)
+            if config.checkpoint_every and step.n % config.checkpoint_every == 0:
+                self.periodic_checkpoints.append(self._save(model_holder[0], f"{config.name}-step{step.n:03d}", config.base_model))
             entry = {"run": config.name, "n": step.n, "model_step": step.model_step, **dict(step.metrics)}
             self.last_rl_steps.append(entry)
             if self._step_log is not None:
                 self._step_log.parent.mkdir(parents=True, exist_ok=True)
                 with self._step_log.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(entry, default=str) + "\n")
+            if on_step is not None:
+                tokens = {"prompt_tokens": usage.prompt_tokens, "completion_tokens": generated, "training_tokens": context}
+                on_step(StepInfo(config.name, step.n, step.model_step, dict(step.metrics), tokens, cost))
             if ledger.remaining <= 0:
                 raise SpendCapExceeded(f"{label}: cap reached after step {step.n}")
 
         renderer = self.renderer(config.base_model)
         dataset = [{"row_id": r.row_id, "system": r.system, "user": r.user} for r in rows]
         self.last_rl_steps: list[dict[str, Any]] = []
+        self.periodic_checkpoints: list[CheckpointRef] = []
+        self.stop_reason: str | None = None
+        self.error_checkpoint: CheckpointRef | None = None
         with self._client.session(experiment=config.name) as session:
             model = session.create_model(
                 base_model=config.base_model,
@@ -326,7 +385,15 @@ class RiverBackend:
                 group_size=config.group_size,
                 max_staleness=0,
             )
-            rl.run(trainer, dataset, steps=config.steps, on_step=on_step)
+            model_holder.append(model)
+            try:
+                rl.run(trainer, dataset, steps=config.steps, on_step=river_on_step)
+            except StopTraining as stop:
+                self.stop_reason = stop.reason
+            except Exception as err:
+                self.stop_reason = f"error: {type(err).__name__}: {str(err)[:200]}"
+                self.error_checkpoint = self._save(model, f"{config.name}-at-error", config.base_model)
+                raise
             return self._save(model, config.name, config.base_model)
 
     def deploy(self, checkpoint: CheckpointRef) -> Endpoint:
@@ -368,7 +435,10 @@ class RiverBackend:
 class RiverLlmClient:
     """LlmClient for the verifier and base-rate judge: one client.sample call on a base model, no training."""
 
-    def __init__(self, backend: RiverBackend, base_model: str, *, max_tokens: int, label: str, temperature: float = 0.0) -> None:
+    def __init__(
+        self, backend: RiverBackend, base_model: str, *, max_tokens: int, label: str, temperature: float = 0.0, timeout: float = 180.0
+    ) -> None:
+        self._timeout = timeout
         self._backend = backend
         self._model = ModelRef(base_model)
         self._max_tokens = max_tokens
@@ -379,7 +449,14 @@ class RiverLlmClient:
     def complete(self, system: str, user: str) -> str:
         prompt = self._backend._prompt(self._model.base_model, system, user)
         [sample] = self._backend.sample_raw(
-            self._model, prompt, n=1, max_tokens=self._max_tokens, temperature=self._temperature, seed=0, label=self._label
+            self._model,
+            prompt,
+            n=1,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+            seed=0,
+            label=self._label,
+            timeout=self._timeout,
         )
         self.calls += 1
         if sample.stop_reason == "length":

@@ -13,7 +13,7 @@ from typing import Any
 from nailed_it_training.base_rate import CachingJudge, CategoryShrunkBaseRate, LlmBaseRateJudge
 from nailed_it_training.episodes import Episode, SplitConfig, build_episodes
 from nailed_it_training.ledger import SpendLedger
-from nailed_it_training.pipeline import DeckScorer, PipelineConfig, information_gain_reward
+from nailed_it_training.pipeline import DeckScorer, PipelineConfig, Telemetry, information_gain_reward
 from nailed_it_training.protocol import EvidenceDigest, EvidenceItem, SourceKind
 from nailed_it_training.reader import MalformedDeckError, parse_reads, render_reader_prompt
 from nailed_it_training.reward import RewardConfig
@@ -25,7 +25,7 @@ TRAINING_ROOT = Path(__file__).resolve().parents[2]
 SPEND_DIR = TRAINING_ROOT / ".spend"
 LEDGER_PATH = SPEND_DIR / "ledger.jsonl"
 REAL_DIGEST = TRAINING_ROOT / "data" / "private" / "iana.digest.json"
-WAVE_CAP_USD = 5.0
+WAVE_CAP_USD = 50.0
 MAX_VISIBLE = 40
 
 _T0 = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
@@ -147,7 +147,8 @@ def step_c() -> dict[str, object]:
     scorer = DeckScorer(verifier, CategoryShrunkBaseRate(judge), RewardConfig())
     reward_errors: list[str] = []
     reward_values: list[float] = []
-    base_reward = information_gain_reward(scorer, {e.episode_id: e for e in episodes}, PipelineConfig())
+    telemetry = Telemetry(capture=SPEND_DIR / "smoke" / "c_failures.jsonl")
+    base_reward = information_gain_reward(scorer, {e.episode_id: e for e in episodes}, PipelineConfig(), telemetry=telemetry)
 
     def reward(row: RlRow, completion: str) -> float:
         try:
@@ -191,8 +192,31 @@ def step_c() -> dict[str, object]:
         "steps": [{k: v for k, v in st.items() if k in ("n", "model_step") or k.startswith(("reward/", "train/"))} for st in backend.last_rl_steps],
         "verifier_cache": vars(verifier.stats),
         "verifier_rejected": inner_verifier.stats.rejected,
+        "verifier_retries": inner_verifier.stats.retries,
+        "verifier_rejected_batches": inner_verifier.stats.rejected_batches,
+        "telemetry": telemetry.drain(),
         "judge_cache": vars(judge.stats),
         "ckpt_sample_shape": _sample_shape(after),
         "ckpt_parse": ckpt_parse,
         "ledger": ledger.totals(),
     }
+
+
+def step_calibrate() -> dict[str, object]:
+    from nailed_it_training.calibration import score_verifier
+
+    backend, ledger = _backend()
+    verifier = LlmVerifier(backend.llm_client(BASE_MODEL, max_tokens=1024, label="smoke:calibrate:verifier"), on_ungrounded="raise")
+    result = score_verifier(verifier)
+    payload = {
+        "accuracy": result.accuracy,
+        "correct": result.correct,
+        "total": result.total,
+        "passed": result.passed,
+        "by_kind": {k.value: v for k, v in result.by_kind.items()},
+        "details": result.details,
+        "errors": result.errors,
+        "verifier_calls": verifier.stats.calls,
+    }
+    _dump("calibration", payload)
+    return {**payload, "ledger": ledger.totals()}

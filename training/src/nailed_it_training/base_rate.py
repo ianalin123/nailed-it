@@ -12,7 +12,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from nailed_it_training.protocol import EvidenceItem, Read, ReadCategory
-from nailed_it_training.verifier import CacheStats, CallStats, LlmClient, VerdictLabel, Verifier, extract_json, text_hash
+from nailed_it_training.verifier import CacheStats, CallStats, LlmCallError, LlmClient, VerdictLabel, Verifier, extract_json, text_hash
 
 DEFAULT_POPULATION = "adults who work in or around software and use AI tools regularly"
 
@@ -74,12 +74,23 @@ class LlmBaseRateJudge:
         out: list[float] = []
         for start in range(0, len(reads), self._batch_size):
             chunk = reads[start : start + self._batch_size]
-            claims = [{"claim": f"c{i}", "text": text} for i, (text, _) in enumerate(chunk)]
-            raw = self._client.complete(self._system, f"Claims (JSON):\n{json.dumps(claims, ensure_ascii=False, indent=1)}")
+            out.extend(self._call_chunk(chunk))
+        return out
+
+    def _call_chunk(self, chunk: Sequence[tuple[str, ReadCategory]]) -> list[float]:
+        """Retry a malformed batch once; a second failure raises."""
+        claims = [{"claim": f"c{i}", "text": text} for i, (text, _) in enumerate(chunk)]
+        user = f"Claims (JSON):\n{json.dumps(claims, ensure_ascii=False, indent=1)}"
+        for attempt in range(2):
             self.stats.calls += 1
             self.stats.items += len(chunk)
-            out.extend(parse_estimates(raw, len(chunk)))
-        return out
+            try:
+                return parse_estimates(self._client.complete(self._system, user), len(chunk))
+            except (JudgeResponseError, LlmCallError):
+                if attempt == 1:
+                    raise
+                self.stats.retries += 1
+        raise AssertionError("unreachable")
 
 
 class CachingJudge:
@@ -101,34 +112,48 @@ class CachingJudge:
 
 
 class CategoryShrunkBaseRate:
-    """b = (w_j * judged + w_c * category_mean) / (w_j + w_c), with category_mean the running mean of prior judgements.
+    """b = (w_j * judged + w_c * category_mean) / (w_j + w_c).
 
-    The first read seen in a category is not shrunk. Judgements update the running mean after use,
-    so results depend on the order reads are scored in.
+    category_mean comes from frozen `category_means` (fit once with fit_category_means) when given, so a
+    read's base rate never depends on which deck it appears in. Without frozen means it is the mean of all
+    judgements of that category in the current batch, so results are invariant to order within a batch.
+    A category absent from the frozen means is not shrunk.
     """
 
-    def __init__(self, judge: BaseRateJudge, judge_weight: float = 4.0, category_weight: float = 1.0) -> None:
+    def __init__(
+        self,
+        judge: BaseRateJudge,
+        judge_weight: float = 4.0,
+        category_weight: float = 1.0,
+        category_means: Mapping[ReadCategory, float] | None = None,
+    ) -> None:
         if judge_weight <= 0 or category_weight < 0:
             raise ValueError("judge_weight must be positive and category_weight non-negative")
         self._judge = judge
         self._wj = judge_weight
         self._wc = category_weight
-        self._sums: dict[ReadCategory, float] = {}
-        self._counts: dict[ReadCategory, int] = {}
+        self._frozen = dict(category_means) if category_means is not None else None
 
-    def category_mean(self, category: ReadCategory) -> float | None:
-        n = self._counts.get(category, 0)
-        return self._sums[category] / n if n else None
+    @staticmethod
+    def _means(reads: Sequence[Read], judged: Sequence[float]) -> dict[ReadCategory, float]:
+        groups: dict[ReadCategory, list[float]] = {}
+        for r, v in zip(reads, judged, strict=True):
+            groups.setdefault(r.category, []).append(v)
+        return {c: sum(v) / len(v) for c, v in groups.items()}
+
+    @classmethod
+    def fit_category_means(cls, judge: BaseRateJudge, reads: Sequence[Read]) -> dict[ReadCategory, float]:
+        if not reads:
+            raise ValueError("need at least one read to fit category means")
+        return cls._means(reads, judge.judge_many([(r.text, r.category) for r in reads]))
 
     def base_rates(self, reads: Sequence[Read], subject: str) -> list[float]:
         judged = self._judge.judge_many([(r.text, r.category) for r in reads])
-        out: list[float] = []
-        for read, value in zip(reads, judged, strict=True):
-            mean = self.category_mean(read.category)
-            out.append(value if mean is None else (self._wj * value + self._wc * mean) / (self._wj + self._wc))
-            self._sums[read.category] = self._sums.get(read.category, 0.0) + value
-            self._counts[read.category] = self._counts.get(read.category, 0) + 1
-        return out
+        means = self._frozen if self._frozen is not None else self._means(reads, judged)
+        return [
+            (self._wj * v + self._wc * means[r.category]) / (self._wj + self._wc) if r.category in means else v
+            for r, v in zip(reads, judged, strict=True)
+        ]
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ class RewardConfig:
     coverage_weight: float = 0.5
     deck_size: int = DECK_SIZE
     size_penalty: float = 0.25
+    invalid_read_penalty: float = -1.0
 
     def __post_init__(self) -> None:
         _require_eps(self.eps)
@@ -203,15 +204,20 @@ def deck_reward(
     read_rewards: Sequence[float],
     config: RewardConfig,
     similarity: Similarity = jaccard_similarity,
+    n_invalid: int = 0,
 ) -> DeckReward:
+    """Invalid reads (schema violations) each score invalid_read_penalty and count toward deck size."""
     if len(reads) != len(read_rewards):
         raise ValueError(f"got {len(reads)} reads but {len(read_rewards)} rewards")
-    if not reads:
+    if n_invalid < 0:
+        raise ValueError("n_invalid must be non-negative")
+    n_total = len(reads) + n_invalid
+    if n_total == 0:
         raise ValueError("a deck needs at least one read")
-    read_mean = float(sum(read_rewards)) / len(read_rewards)
+    read_mean = (float(sum(read_rewards)) + n_invalid * config.invalid_read_penalty) / n_total
     redundancy = mean_pairwise_similarity([r.text for r in reads], similarity)
     coverage = category_coverage([r.category for r in reads])
-    size_penalty = config.size_penalty * abs(len(reads) - config.deck_size)
+    size_penalty = config.size_penalty * abs(n_total - config.deck_size)
     total = read_mean - config.redundancy_weight * redundancy + config.coverage_weight * coverage - size_penalty
     return DeckReward(read_mean=read_mean, redundancy=redundancy, coverage=coverage, size_penalty=size_penalty, total=total)
 

@@ -76,23 +76,42 @@ class TestCategoryShrunkBaseRate:
     def test_vague_read_with_high_judged_base_rate_earns_about_zero_at_matching_confidence(self) -> None:
         judge = FixedJudge({"You sometimes doubt yourself.": 0.95, "You want to do good work.": 0.9})
         source = CategoryShrunkBaseRate(judge, judge_weight=4.0, category_weight=1.0)
-        source.base_rates([read("You want to do good work.")], subject="p")
-        [b] = source.base_rates([read("You sometimes doubt yourself.")], subject="p")
-        assert b == pytest.approx((4 * 0.95 + 0.9) / 5)
+        rates = source.base_rates([read("You want to do good work."), read("You sometimes doubt yourself.")], subject="p")
+        b = rates[1]
+        assert b == pytest.approx((4 * 0.95 + 0.925) / 5)
         c = 0.95
         assert abs(expected_information_gain(c, c, b, 0.01)) < 0.01
         assert information_gain(c, 1, b, 0.01) < 0.05
 
-    def test_shrinks_toward_category_mean_not_one_half(self) -> None:
+    def test_shrinks_toward_batch_category_mean_not_one_half(self) -> None:
         judge = FixedJudge({"a": 0.9, "b": 0.9, "rare": 0.1})
         source = CategoryShrunkBaseRate(judge, judge_weight=1.0, category_weight=1.0)
-        source.base_rates([read("a"), read("b")], subject="p")
-        [b] = source.base_rates([read("rare")], subject="p")
-        assert b == pytest.approx(0.5 * 0.1 + 0.5 * 0.9)
-        assert source.category_mean(ReadCategory.AMBITION_PSYCHOLOGY) == pytest.approx((0.9 + 0.9 + 0.1) / 3)
+        rates = source.base_rates([read("a"), read("b"), read("rare")], subject="p")
+        mean = (0.9 + 0.9 + 0.1) / 3
+        assert rates[2] == pytest.approx(0.5 * 0.1 + 0.5 * mean)
 
-    def test_first_read_in_a_category_is_not_shrunk(self) -> None:
-        source = CategoryShrunkBaseRate(FixedJudge({"x": 0.2}))
+    def test_batch_mode_is_order_invariant(self) -> None:
+        values = {"a": 0.9, "b": 0.2, "c": 0.6, "d": 0.4}
+        cats = {"a": ReadCategory.WORK_STYLE, "b": ReadCategory.WORK_STYLE, "c": ReadCategory.RISKY_READ, "d": ReadCategory.RISKY_READ}
+        reads = [read(t, cats[t]) for t in values]
+        source = CategoryShrunkBaseRate(FixedJudge(values))
+        forward = dict(zip(values, source.base_rates(reads, subject="p"), strict=True))
+        backward = dict(zip(reversed(list(values)), source.base_rates(list(reversed(reads)), subject="p"), strict=True))
+        assert forward == pytest.approx(backward)
+
+    def test_frozen_means_make_rates_independent_of_the_batch(self) -> None:
+        values = {"a": 0.9, "b": 0.2, "x": 0.5}
+        judge = FixedJudge(values)
+        means = CategoryShrunkBaseRate.fit_category_means(judge, [read("a"), read("b")])
+        assert means[ReadCategory.AMBITION_PSYCHOLOGY] == pytest.approx(0.55)
+        source = CategoryShrunkBaseRate(judge, category_means=means)
+        alone = source.base_rates([read("x")], subject="p")
+        with_others = source.base_rates([read("a"), read("x"), read("b")], subject="p")[1]
+        assert alone[0] == pytest.approx(with_others)
+        assert alone[0] == pytest.approx((4 * 0.5 + 0.55) / 5)
+
+    def test_category_missing_from_frozen_means_is_not_shrunk(self) -> None:
+        source = CategoryShrunkBaseRate(FixedJudge({"x": 0.2}), category_means={ReadCategory.WORK_STYLE: 0.9})
         assert source.base_rates([read("x", ReadCategory.RISKY_READ)], subject="p") == [pytest.approx(0.2)]
 
     def test_bold_correct_read_still_pays(self) -> None:
@@ -142,3 +161,23 @@ class TestLlmBaseRateJudge:
 def test_population_base_rate_remains_available() -> None:
     source = PopulationBaseRate(KeywordVerifier(RULES), {"a": person("up at 3am"), "b": person("asleep by 9")}, prior_strength=2.0)
     assert source.base_rates([read("You are a night owl.")], subject="me") == [pytest.approx((1 + 1) / (2 + 2))]
+
+
+class SequenceClient:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = replies
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls += 1
+        return self.replies[min(self.calls - 1, len(self.replies) - 1)]
+
+
+def test_judge_retries_once_then_raises() -> None:
+    good = json.dumps({"estimates": [{"claim": "c0", "baseRate": 0.4}]})
+    client = SequenceClient(["bad", good])
+    judge = LlmBaseRateJudge(client)
+    assert judge.judge_many([("x", ReadCategory.WORK_STYLE)]) == [0.4]
+    assert judge.stats.retries == 1
+    with pytest.raises(JudgeResponseError):
+        LlmBaseRateJudge(SequenceClient(["bad", "bad"])).judge_many([("x", ReadCategory.WORK_STYLE)])

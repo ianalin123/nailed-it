@@ -281,3 +281,21 @@ class TestDeckReward:
     def test_jaccard_similarity_bounds(self) -> None:
         assert jaccard_similarity("a b c", "a b c") == 1.0
         assert jaccard_similarity("a b", "c d") == 0.0
+
+
+class TestInvalidReads:
+    config = RewardConfig(eps=EPS, redundancy_weight=1.0, coverage_weight=0.5, deck_size=12, size_penalty=0.25, invalid_read_penalty=-1.0)
+
+    def test_invalid_reads_count_toward_mean_and_deck_size(self) -> None:
+        reads = distinct_reads(10)
+        result = deck_reward(reads, [0.5] * 10, self.config, n_invalid=2)
+        assert result.read_mean == pytest.approx((0.5 * 10 - 2.0) / 12)
+        assert result.size_penalty == 0.0
+
+    def test_all_invalid_deck_is_scored_not_crashed(self) -> None:
+        result = deck_reward([], [], self.config, n_invalid=12)
+        assert result.read_mean == -1.0 and result.redundancy == 0.0 and result.coverage == 0.0
+
+    def test_empty_deck_without_invalid_reads_still_raises(self) -> None:
+        with pytest.raises(ValueError):
+            deck_reward([], [], self.config)

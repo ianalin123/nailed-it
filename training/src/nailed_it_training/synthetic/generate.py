@@ -133,8 +133,8 @@ UNKNOWN_CLAIM_BASE_RATE = 0.3
 
 
 class LexiconJudge:
-    """Test double for BaseRateJudge: the prevalence the lexicon was generated with. Claims outside the lexicon get 0.3."""
+    """Test double for BaseRateJudge: the prevalence of the lexicon trait a claim starts with. Other claims get 0.3."""
 
     def judge_many(self, reads: Sequence[tuple[str, ReadCategory]]) -> list[float]:
         prevalence = {t.read_text: (t.p_without_signal * 2.5 if t.signal else t.prevalence.value) for t in LEXICON}
-        return [prevalence.get(text, UNKNOWN_CLAIM_BASE_RATE) for text, _ in reads]
+        return [next((p for t, p in prevalence.items() if text.startswith(t)), UNKNOWN_CLAIM_BASE_RATE) for text, _ in reads]

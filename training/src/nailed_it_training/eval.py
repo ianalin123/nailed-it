@@ -11,6 +11,7 @@ from nailed_it_training.reward import DeckReward, Gate, ScoredRead
 class ScoredDeck:
     reads: tuple[ScoredRead, ...]
     reward: DeckReward
+    n_invalid: int = 0
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class EvalMetrics:
     ungrounded_rate: float
     deck_redundancy: float
     n_malformed: int = 0
+    n_invalid_reads: int = 0
 
 
 class AblationRow(Enum):
@@ -64,6 +66,8 @@ def compute_metrics(decks: Sequence[ScoredDeck], n_malformed: int = 0) -> EvalMe
         raise ValueError("no decks to evaluate")
     reads = [r for d in decks for r in d.reads]
     n = len(reads)
+    if n == 0:
+        raise ValueError("no valid reads to evaluate")
     decided = [r for r in reads if r.outcome is not None]
     passed = [r for r in reads if r.gate is Gate.PASSED]
     return EvalMetrics(
@@ -76,6 +80,7 @@ def compute_metrics(decks: Sequence[ScoredDeck], n_malformed: int = 0) -> EvalMe
         ungrounded_rate=sum(r.gate is Gate.UNGROUNDED for r in reads) / n,
         deck_redundancy=sum(d.reward.redundancy for d in decks) / len(decks),
         n_malformed=n_malformed,
+        n_invalid_reads=sum(d.n_invalid for d in decks),
     )
 
 
@@ -89,6 +94,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("Redundancy", "deck_redundancy"),
     ("Reads", "n_reads"),
     ("Malformed", "n_malformed"),
+    ("Invalid reads", "n_invalid_reads"),
 )
 
 

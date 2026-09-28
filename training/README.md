@@ -52,6 +52,12 @@ uv run nailed-it-train demo --seed 1 --with-verdicts   # also audits the verifie
 - **Grounding (amendment 4, plus chains).** A read is ungrounded (-1) if `evidenceIds` is empty or names a non-visible id, or if any chain evidence step fails to start with `[<visible id>]`, or if the chain has no evidence step. The TypeScript `ChainStep` has no id field, so the id travels inside the step's `text`. Recommendation: add `evidenceId?: string` to `ChainStep`.
 - **Deck (amendment 5).** `mean(read rewards) - 1.0 * mean pairwise Jaccard + 0.5 * coverage - 0.25 * |n - 12|`. Wrong-size decks are penalised, not rescaled.
 - **Audit (amendment 6).** Training stops only when the overlap has at least 30 reads and the Wilson 95% upper bound on agreement is below 0.75. Agreement is `mean(1 - |verifier - human|)`, so `partly` earns half credit.
+- **Verifier contract (wave 3).** A verdict cites at most 3 items; more than 3 is rejected in code. "Supported" means the evidence would be surprising if the claim were false. Merely compatible evidence gets "unverifiable". `calibration.py` holds 20 invented claims with known answers (supported, contradicted, compatible, unrelated), and `score_verifier` grades any verifier; 80% is the bar for training. In training mode, a malformed verifier batch is retried once, then marked unverifiable and counted.
+- **Evidence caps.** Each verifier call sees at most 80 items, chosen by lexical overlap with the deck's claims (round-robin, deterministic). The hidden and visible sides are selected separately and never mixed.
+- **Per-read parsing at reward time.** Unparseable JSON costs the deck −2. A single invalid read (over 240 characters, bad category, bad chain) costs −1 and counts toward deck size.
+- **Stage A.** Survivors from one episode are pooled and assembled into exact 12-read decks, matching RL. Episodes with fewer than 12 distinct survivors are skipped and counted.
+- **Category means.** These are fit once from all stage A teacher reads and then frozen, so a read's base rate does not depend on its deck or the scoring order. Without frozen means, the per-batch mean is order-invariant.
+- **Per-step metrics and early stop.** Each RL step appends to `.spend/metrics.jsonl`: reward, information gain, gate shares, unverifiable share, confidence, tokens, and cost. The run stops if the reward slope over 15 steps is ≤ 0, if the unverifiable share over the last 3 steps is above 0.7, or at $45. Named inference checkpoints are saved every 10 steps.
 - **Cost control.** `CachingVerifier` keys on (read text hash, evidence-set hash). `CachingJudge` keys on the read text hash. `LlmVerifier` batches up to `batch_size` claims per call. Call and hit counts are available on `.stats`.
 - **Spend ledger.** `SpendLedger` checks every River call's worst-case cost before the call, records the real token counts after, and persists to `.spend/ledger.jsonl` (gitignored), so the cap holds across processes. River reports `prompt_tokens=0` from `Client.sample`, so prompt tokens are counted locally with River's own renderer tokenizer.
 - **Unverifiable reads.** Reward is `(1 - u) * E_critic[R]` with the assertion floor applied, or 0 without a critic.
@@ -68,7 +74,8 @@ uv run nailed-it-train demo --seed 1 --with-verdicts   # also audits the verifie
 uv sync --extra river
 set -a; . ./.env.local; set +a            # RIVER_API_KEY, process environment only
 set -x HF_HUB_DISABLE_XET 1               # the Xet download client does not go through the sandbox proxy
-uv run nailed-it-train smoke a|b|c        # reader sample, verifier + judge, minimal RL; $5 cap across all three
+uv run nailed-it-train smoke a|b|c|calibrate   # reader sample, verifier + judge, minimal RL, verifier calibration
+uv run nailed-it-train full freeze|stage-a|sft|rl-full|rl-correctness|eval|results   # the full run, resumable
 ```
 
 ## Caveats

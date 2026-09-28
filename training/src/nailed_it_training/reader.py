@@ -1,6 +1,7 @@
 """Reader prompt rendering and completion parsing, shared by every backend."""
 
 import json
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
@@ -14,7 +15,8 @@ READER_SYSTEM_PROMPT = f"""You read a person from evidence about them and write 
 assumptions about who they are, each with your honest probability that they would confirm it.
 
 Rules:
-- Write exactly {DECK_SIZE} reads. Each read is at most {MAX_READ_LENGTH} characters, second person ("You ...").
+- Write exactly {DECK_SIZE} reads. Each read is one sentence in second person ("You ..."), aim for under 200 characters;
+  {MAX_READ_LENGTH} characters is a hard limit and longer reads are thrown out.
 - Do not restate an evidence item. Infer something the evidence implies but does not say.
 - Avoid statements true of almost everyone. They earn nothing.
 - confidence is your probability, from 0 to 1, that the person confirms the read. Be calibrated.
@@ -63,3 +65,30 @@ def parse_reads(raw: str, *, model_version: str) -> list[Read]:
         return [Read(**d.model_dump(), model_version=model_version) for d in draft.reads]
     except ValidationError as err:
         raise MalformedDeckError(f"completion is not a valid deck: {err.error_count()} errors, first: {err.errors()[0]['msg']}") from err
+
+
+@dataclass(frozen=True)
+class ParsedDeck:
+    reads: list[Read]
+    errors: list[str]
+
+
+def parse_deck(raw: str, *, model_version: str) -> ParsedDeck:
+    """Reward-time parser: the deck must be a JSON object with a "reads" list, but each read is validated on its own.
+    Invalid reads are dropped and reported so the caller can penalise them without discarding the whole deck."""
+    try:
+        payload = json.loads(extract_json(raw), strict=False)
+    except json.JSONDecodeError as err:
+        raise MalformedDeckError(f"completion is not JSON: {err.msg}") from err
+    if not isinstance(payload, dict) or not isinstance(payload.get("reads"), list):
+        raise MalformedDeckError('completion must be a JSON object with a "reads" list')
+    reads: list[Read] = []
+    errors: list[str] = []
+    for i, item in enumerate(payload["reads"]):
+        try:
+            draft = _DraftRead.model_validate(item)
+            reads.append(Read(**draft.model_dump(), model_version=model_version))
+        except ValidationError as err:
+            first = err.errors()[0]
+            errors.append(f"reads[{i}]: {'.'.join(str(p) for p in first['loc'])}: {first['msg']}")
+    return ParsedDeck(reads, errors)

@@ -5,17 +5,32 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from nailed_it_training.base_rate import BaseRateSource
 from nailed_it_training.critic import AUDIT_MIN_OVERLAP, AuditResult, AuditStatus, Critic, audit_verifier, hashing_embedder
 from nailed_it_training.episodes import Episode, EpisodeKind, SplitConfig, build_episodes
 from nailed_it_training.eval import AblationRow, EvalMetrics, ScoredDeck, compute_metrics, render_ablation_table
 from nailed_it_training.fake_backend import FAKE_BASE, FAKE_TEACHER
+from nailed_it_training.ledger import SpendLedger
 from nailed_it_training.protocol import EvidenceDigest, Read, VerdictRecord
-from nailed_it_training.reader import MalformedDeckError, parse_reads, render_reader_prompt
-from nailed_it_training.reward import Gate, RewardConfig, ScoredRead, deck_reward, score_read
-from nailed_it_training.river_adapter import CheckpointRef, ModelRef, RlConfig, RlRow, SftConfig, SftExample, TrainerBackend
-from nailed_it_training.verifier import VerdictLabel, Verifier, is_restatement
+from nailed_it_training.reader import MalformedDeckError, parse_deck, render_reader_prompt
+from nailed_it_training.reward import DECK_SIZE, Gate, RewardConfig, ScoredRead, deck_reward, score_read
+from nailed_it_training.river_adapter import (
+    CheckpointRef,
+    ModelRef,
+    RlConfig,
+    RlRow,
+    SftConfig,
+    SftExample,
+    StepHook,
+    StepInfo,
+    StopTraining,
+    TrainerBackend,
+)
+from nailed_it_training.verifier import HIDDEN_CAP, VerdictLabel, Verifier, is_restatement, select_relevant
 
 
 class BenchmarkTamperedError(RuntimeError):
@@ -42,7 +57,6 @@ class PipelineConfig:
     split: SplitConfig = field(default_factory=lambda: SplitConfig(n_temporal=3))
     reward: RewardConfig = field(default_factory=RewardConfig)
     teacher_decks_per_episode: int = 2
-    min_survivors: int = 3
     eval_samples_per_episode: int = 4
     sft_steps: int = 20
     rl_steps: int = 20
@@ -71,6 +85,7 @@ class StageAResult:
     survivors: tuple[ScoredRead, ...]
     n_teacher_reads: int
     n_malformed: int
+    n_skipped_episodes: int = 0
 
 
 @dataclass(frozen=True)
@@ -134,18 +149,31 @@ def hold_out_time_window(digest: EvidenceDigest, *, fraction: float, min_hidden:
 
 
 class DeckScorer:
-    """Scores a deck with batched verifier calls: one pass over hidden items, one over visible items for restatement."""
+    """Scores a deck with two batched verifier calls: one over the hidden side, one over the visible side for
+    restatement. Each side is cut to `evidence_cap` items by lexical relevance to the deck, drawn only from that side."""
 
-    def __init__(self, verifier: Verifier, base_rates: BaseRateSource, config: RewardConfig, critic: Critic | None = None) -> None:
+    def __init__(
+        self,
+        verifier: Verifier,
+        base_rates: BaseRateSource,
+        config: RewardConfig,
+        critic: Critic | None = None,
+        evidence_cap: int = HIDDEN_CAP,
+    ) -> None:
         self._verifier = verifier
         self._base_rates = base_rates
         self._config = config
         self._critic = critic
+        self._cap = evidence_cap
 
-    def score(self, episode: Episode, reads: Sequence[Read]) -> ScoredDeck:
+    def score(self, episode: Episode, reads: Sequence[Read], n_invalid: int = 0) -> ScoredDeck:
+        if not reads:
+            return ScoredDeck(reads=(), reward=deck_reward([], [], self._config, n_invalid=n_invalid), n_invalid=n_invalid)
         texts = [r.text for r in reads]
-        verdicts = self._verifier.verify_many(texts, episode.hidden)
-        entailed = [is_restatement(v, self._config.min_verdict_strength) for v in self._verifier.verify_many(texts, episode.visible)]
+        hidden = select_relevant(texts, episode.hidden, k=self._cap)
+        visible = select_relevant(texts, episode.visible, k=self._cap)
+        verdicts = self._verifier.verify_many(texts, hidden)
+        entailed = [is_restatement(v, self._config.min_verdict_strength) for v in self._verifier.verify_many(texts, visible)]
         rates = self._base_rates.base_rates(reads, episode.digest_id)
         scored = tuple(
             score_read(
@@ -159,22 +187,40 @@ class DeckScorer:
             )
             for read, verdict, rate, ent in zip(reads, verdicts, rates, entailed, strict=True)
         )
-        return ScoredDeck(reads=scored, reward=deck_reward(reads, [s.reward for s in scored], self._config))
+        reward = deck_reward(reads, [s.reward for s in scored], self._config, n_invalid=n_invalid)
+        return ScoredDeck(reads=scored, reward=reward, n_invalid=n_invalid)
 
 
 def _completion(reads: Sequence[Read]) -> str:
-    return json.dumps({"reads": [r.model_dump(by_alias=True, exclude={"model_version"}) for r in reads]})
+    return json.dumps({"reads": [r.model_dump(by_alias=True, exclude={"model_version"}, exclude_none=True) for r in reads]})
+
+
+def assemble_decks(survivors: Sequence[ScoredRead], deck_size: int = DECK_SIZE) -> list[list[Read]]:
+    """Distinct survivors (by normalised text), best reward first, cut into full decks of deck_size, re-numbered r1..rN."""
+    unique: dict[str, ScoredRead] = {}
+    for s in survivors:
+        key = " ".join(s.read.text.lower().split())
+        if key not in unique or s.reward > unique[key].reward:
+            unique[key] = s
+    ranked = sorted(unique.values(), key=lambda s: (-s.reward, s.read.text))
+    decks = []
+    for start in range(0, len(ranked) - deck_size + 1, deck_size):
+        chunk = ranked[start : start + deck_size]
+        decks.append([s.read.model_copy(update={"id": f"r{i}"}) for i, s in enumerate(chunk, start=1)])
+    return decks
 
 
 def run_stage_a(
     backend: TrainerBackend, scorer: DeckScorer, episodes: Sequence[Episode], config: PipelineConfig
 ) -> StageAResult:
-    """Teacher writes decks; keep reads that pass the gates and verify with R > 0."""
+    """Teacher writes decks; keep reads that pass the gates and verify with R > 0. Survivors of one episode are pooled
+    and assembled into exact 12-read decks, matching RL. Episodes with fewer than 12 distinct survivors are skipped."""
     raw: list[SftExample] = []
     verified: list[SftExample] = []
     survivors: list[ScoredRead] = []
-    n_reads = n_malformed = 0
+    n_reads = n_malformed = n_skipped = 0
     for episode in episodes:
+        pooled: list[ScoredRead] = []
         system, user = render_reader_prompt(episode)
         texts = backend.sample(
             ModelRef(config.teacher_model),
@@ -187,45 +233,200 @@ def run_stage_a(
         )
         for text in texts:
             try:
-                reads = parse_reads(text, model_version=config.teacher_model)
+                reads = parse_deck(text, model_version=config.teacher_model).reads
             except MalformedDeckError:
+                n_malformed += 1
+                continue
+            if not reads:
                 n_malformed += 1
                 continue
             n_reads += len(reads)
             raw.append(SftExample(system=system, user=user, completion=text))
             kept = [s for s in scorer.score(episode, reads).reads if s.gate is Gate.PASSED and s.outcome is not None and s.reward > 0]
-            survivors.extend(kept)
-            if len(kept) >= config.min_survivors:
-                verified.append(SftExample(system=system, user=user, completion=_completion([s.read for s in kept])))
-    return StageAResult(tuple(raw), tuple(verified), tuple(survivors), n_reads, n_malformed)
+            pooled.extend(kept)
+        survivors.extend(pooled)
+        decks = assemble_decks(pooled, config.reward.deck_size)
+        if not decks:
+            n_skipped += 1
+        verified.extend(SftExample(system=system, user=user, completion=_completion(deck)) for deck in decks)
+    return StageAResult(tuple(raw), tuple(verified), tuple(survivors), n_reads, n_malformed, n_skipped)
 
 
 RewardFn = Callable[[RlRow, str], float]
 
 
-def information_gain_reward(scorer: DeckScorer, episodes: Mapping[str, Episode], config: PipelineConfig) -> RewardFn:
+class Telemetry:
+    """Collects per-rollout reward statistics between RL steps. Thread-safe enough for River's to_thread rewards:
+    list.append is atomic in CPython and drain swaps the list."""
+
+    def __init__(self, capture: Path | None = None, capture_limit: int = 20) -> None:
+        self._rows: list[dict[str, Any]] = []
+        self._capture = capture
+        self._capture_left = capture_limit
+
+    def capture(self, kind: str, completion: str, errors: Sequence[str]) -> None:
+        """Keep a bounded sample of failing completions for diagnosis (they may quote real evidence: .spend only)."""
+        if self._capture is None or self._capture_left <= 0:
+            return
+        self._capture_left -= 1
+        self._capture.parent.mkdir(parents=True, exist_ok=True)
+        with self._capture.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"kind": kind, "errors": list(errors), "completion": completion}) + "\n")
+
+    def record_deck(self, deck: ScoredDeck) -> None:
+        reads = deck.reads
+        n = len(reads) + deck.n_invalid
+        passed = [r for r in reads if r.gate is Gate.PASSED]
+        self._rows.append(
+            {
+                "reward": deck.reward.total,
+                "information_gain": sum(r.reward for r in reads if r.outcome is not None) / n,
+                "restatement": sum(r.gate is Gate.RESTATEMENT for r in reads) / n,
+                "ungrounded": sum(r.gate is Gate.UNGROUNDED for r in reads) / n,
+                "invalid": deck.n_invalid / n,
+                "unverifiable": sum(r.outcome is None for r in passed) / len(passed) if passed else None,
+                "confidence": sum(r.read.confidence for r in reads) / len(reads) if reads else None,
+                "n_reads": n,
+                "malformed": False,
+            }
+        )
+
+    def record_simple(self, reward: float, *, supported: float | None, unverifiable: float | None, confidence: float | None) -> None:
+        self._rows.append(
+            {"reward": reward, "supported": supported, "unverifiable": unverifiable, "confidence": confidence, "malformed": False}
+        )
+
+    def record_malformed(self, reward: float) -> None:
+        self._rows.append({"reward": reward, "malformed": True})
+
+    @staticmethod
+    def _mean(rows: list[dict[str, Any]], key: str) -> float | None:
+        values = [r[key] for r in rows if r.get(key) is not None]
+        return sum(values) / len(values) if values else None
+
+    def drain(self) -> dict[str, Any]:
+        rows, self._rows = self._rows, []
+        ok = [r for r in rows if not r["malformed"]]
+        return {
+            "n_decks": len(rows),
+            "n_malformed": len(rows) - len(ok),
+            "mean_reward": self._mean(rows, "reward"),
+            "mean_information_gain": self._mean(ok, "information_gain"),
+            "share_restatement": self._mean(ok, "restatement"),
+            "share_ungrounded": self._mean(ok, "ungrounded"),
+            "share_invalid": self._mean(ok, "invalid"),
+            "share_unverifiable": self._mean(ok, "unverifiable"),
+            "share_supported": self._mean(ok, "supported"),
+            "mean_confidence": self._mean(ok, "confidence"),
+        }
+
+
+def information_gain_reward(
+    scorer: DeckScorer, episodes: Mapping[str, Episode], config: PipelineConfig, telemetry: Telemetry | None = None
+) -> RewardFn:
     def reward(row: RlRow, completion: str) -> float:
         try:
-            reads = parse_reads(completion, model_version="policy")
-        except MalformedDeckError:
+            parsed = parse_deck(completion, model_version="policy")
+        except MalformedDeckError as err:
+            if telemetry is not None:
+                telemetry.record_malformed(config.malformed_reward)
+                telemetry.capture("malformed", completion, [str(err)])
             return config.malformed_reward
-        return scorer.score(episodes[row.row_id], reads).reward.total
+        if parsed.errors and telemetry is not None:
+            telemetry.capture("invalid_reads", completion, parsed.errors)
+        deck = scorer.score(episodes[row.row_id], parsed.reads, n_invalid=len(parsed.errors))
+        if telemetry is not None:
+            telemetry.record_deck(deck)
+        return deck.reward.total
 
     return reward
 
 
-def correctness_reward(verifier: Verifier, episodes: Mapping[str, Episode]) -> RewardFn:
+def correctness_reward(
+    verifier: Verifier, episodes: Mapping[str, Episode], telemetry: Telemetry | None = None, evidence_cap: int = HIDDEN_CAP
+) -> RewardFn:
     """The naive baseline: fraction of reads the verifier supports. No gates, no base rate."""
 
     def reward(row: RlRow, completion: str) -> float:
         try:
-            reads = parse_reads(completion, model_version="policy")
+            parsed = parse_deck(completion, model_version="policy")
         except MalformedDeckError:
+            if telemetry is not None:
+                telemetry.record_malformed(0.0)
             return 0.0
-        verdicts = verifier.verify_many([r.text for r in reads], episodes[row.row_id].hidden)
-        return sum(v.label is VerdictLabel.SUPPORTED for v in verdicts) / len(reads)
+        reads = parsed.reads
+        n = len(reads) + len(parsed.errors)
+        if not reads:
+            if telemetry is not None:
+                telemetry.record_simple(0.0, supported=0.0, unverifiable=None, confidence=None)
+            return 0.0
+        texts = [r.text for r in reads]
+        verdicts = verifier.verify_many(texts, select_relevant(texts, episodes[row.row_id].hidden, k=evidence_cap))
+        value = sum(v.label is VerdictLabel.SUPPORTED for v in verdicts) / n
+        if telemetry is not None:
+            unverifiable = sum(v.label is VerdictLabel.UNVERIFIABLE for v in verdicts) / len(reads)
+            confidence = sum(r.confidence for r in reads) / len(reads)
+            telemetry.record_simple(value, supported=value, unverifiable=unverifiable, confidence=confidence)
+        return value
 
     return reward
+
+
+@dataclass(frozen=True)
+class StopPolicy:
+    """Early stop: reward trend flat or falling over `window` steps (least-squares slope <= 0), the mean share of
+    unverifiable reads over the last `unverifiable_window` steps above `max_unverifiable`, or spend at the limit."""
+
+    window: int = 15
+    max_unverifiable: float = 0.7
+    unverifiable_window: int = 3
+    spend_limit: float = 45.0
+
+    def reason(self, history: Sequence[Mapping[str, Any]], spent: float) -> str | None:
+        if spent >= self.spend_limit:
+            return f"spend ${spent:.2f} reached the ${self.spend_limit:.2f} limit"
+        recent = [h["share_unverifiable"] for h in history[-self.unverifiable_window :] if h.get("share_unverifiable") is not None]
+        if len(recent) == self.unverifiable_window and sum(recent) / len(recent) > self.max_unverifiable:
+            return f"share of unverifiable reads {sum(recent) / len(recent):.2f} > {self.max_unverifiable} over {len(recent)} steps"
+        rewards = [h["mean_reward"] for h in history[-self.window :] if h.get("mean_reward") is not None]
+        if len(history) >= self.window and len(rewards) == self.window:
+            xs = range(self.window)
+            x_mean = (self.window - 1) / 2
+            y_mean = sum(rewards) / self.window
+            slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, rewards, strict=True)) / sum((x - x_mean) ** 2 for x in xs)
+            if slope <= 0:
+                return f"mean reward flat or falling over the last {self.window} steps (slope {slope:.4f})"
+        return None
+
+
+def metrics_hook(run: str, telemetry: Telemetry, path: Path, policy: StopPolicy, ledger: SpendLedger | None) -> StepHook:
+    """Appends one JSON line per completed RL step, then raises StopTraining if the policy says so."""
+    history: list[dict[str, Any]] = []
+
+    def hook(step: StepInfo) -> None:
+        summary = telemetry.drain()
+        history.append(summary)
+        spent = ledger.spent if ledger is not None else 0.0
+        reason = policy.reason(history, spent)
+        row = {
+            "at": datetime.now(UTC).isoformat(),
+            "run": run,
+            "n": step.n,
+            "model_step": step.model_step,
+            **summary,
+            "tokens": step.usage,
+            "step_cost_usd": step.cost_usd,
+            "spent_usd": spent,
+            "river": {k: v for k, v in step.river_metrics.items() if isinstance(v, int | float | str | bool) or v is None},
+            "stop_reason": reason,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=str) + "\n")
+        if reason is not None:
+            raise StopTraining(reason)
+
+    return hook
 
 
 def _recording(reward_fn: RewardFn, sink: list[float]) -> RewardFn:
@@ -244,8 +445,15 @@ def _per_step(rewards: list[float], per_step: int) -> list[float]:
 def evaluate(
     backend: TrainerBackend, target: ModelRef, benchmark: FrozenBenchmark, scorer: DeckScorer, config: PipelineConfig
 ) -> EvalMetrics:
+    return evaluate_decks(backend, target, benchmark, scorer, config)[0]
+
+
+def evaluate_decks(
+    backend: TrainerBackend, target: ModelRef, benchmark: FrozenBenchmark, scorer: DeckScorer, config: PipelineConfig
+) -> tuple[EvalMetrics, list[tuple[str, ScoredDeck]]]:
     verify_frozen(benchmark)
     decks: list[ScoredDeck] = []
+    labelled: list[tuple[str, ScoredDeck]] = []
     n_malformed = 0
     for episode in benchmark.episodes:
         system, user = render_reader_prompt(episode)
@@ -260,10 +468,16 @@ def evaluate(
         )
         for text in texts:
             try:
-                decks.append(scorer.score(episode, parse_reads(text, model_version="eval")))
+                parsed = parse_deck(text, model_version="eval")
             except MalformedDeckError:
                 n_malformed += 1
-    return compute_metrics(decks, n_malformed=n_malformed)
+                continue
+            deck = scorer.score(episode, parsed.reads, n_invalid=len(parsed.errors))
+            decks.append(deck)
+            labelled.append((episode.episode_id, deck))
+    if not decks:
+        raise ValueError(f"every completion from {target} was malformed ({n_malformed}); nothing to evaluate")
+    return compute_metrics(decks, n_malformed=n_malformed), labelled
 
 
 def run_audit(
@@ -293,7 +507,7 @@ def run_audit(
     return result
 
 
-def _split_digests(
+def split_digests(
     digests: Sequence[EvidenceDigest], config: PipelineConfig
 ) -> tuple[list[EvidenceDigest], list[Episode], FrozenBenchmark, frozenset[str]]:
     unknown = config.heldout_digest_ids - {d.digest_id for d in digests}
@@ -328,7 +542,7 @@ def run_pipeline(
     verdicts: Sequence[VerdictRecord] | None = None,
 ) -> PipelineResult:
     """Stages A and B on owner-approved digests, then the ablation on the frozen benchmark."""
-    training_digests, training_episodes, benchmark, eval_ids = _split_digests(digests, config)
+    training_digests, training_episodes, benchmark, eval_ids = split_digests(digests, config)
 
     audit = run_audit(verdicts, {d.digest_id: d for d in digests}, verifier, config)
     critic = Critic.fit(verdicts, hashing_embedder(64), seed=config.seed) if verdicts else None
@@ -337,8 +551,8 @@ def run_pipeline(
     stage_a = run_stage_a(backend, scorer, training_episodes, config)
     if not stage_a.verified_examples:
         raise StageAStarvedError(
-            f"stage A kept {len(stage_a.survivors)} of {stage_a.n_teacher_reads} teacher reads but no deck had "
-            f"{config.min_survivors}+ survivors; sample more teacher decks or lower min_survivors"
+            f"stage A kept {len(stage_a.survivors)} of {stage_a.n_teacher_reads} teacher reads but no episode had "
+            f"{config.reward.deck_size} distinct survivors; sample more teacher decks per episode"
         )
     raw_ckpt = backend.start_sft(
         backend.upload_dataset("raw-teacher", stage_a.raw_examples),

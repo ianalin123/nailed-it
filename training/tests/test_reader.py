@@ -3,7 +3,7 @@ import json
 import pytest
 
 from nailed_it_training.episodes import SplitConfig, build_episodes
-from nailed_it_training.reader import MalformedDeckError, parse_reads, render_reader_prompt
+from nailed_it_training.reader import MalformedDeckError, parse_deck, parse_reads, render_reader_prompt
 from nailed_it_training.synthetic import generate_personas
 
 
@@ -53,3 +53,31 @@ def test_strips_reasoning_block_and_code_fence() -> None:
 def test_malformed_completions_raise(raw: str) -> None:
     with pytest.raises(MalformedDeckError):
         parse_reads(raw, model_version="m")
+
+
+class TestLenientParse:
+    def test_invalid_reads_are_dropped_and_reported_not_fatal(self) -> None:
+        reads = [read_json(i) for i in range(4)]
+        reads[1] = {**reads[1], "text": "x" * 300}
+        reads[2] = {**reads[2], "chain": [{"kind": "inference", "text": "y"}] * 7}
+        parsed = parse_deck(json.dumps({"reads": reads}), model_version="m")
+        assert [r.id for r in parsed.reads] == ["r0", "r3"]
+        assert len(parsed.errors) == 2
+        assert "reads[1]" in parsed.errors[0] and "reads[2]" in parsed.errors[1]
+
+    @pytest.mark.parametrize("raw", ["no json", json.dumps([1, 2]), json.dumps({"notreads": []}), json.dumps({"reads": "x"})])
+    def test_unparseable_decks_still_raise(self, raw: str) -> None:
+        with pytest.raises(MalformedDeckError):
+            parse_deck(raw, model_version="m")
+
+
+def test_raw_control_characters_inside_strings_are_tolerated() -> None:
+    reads = [read_json(i) for i in range(3)]
+    raw = json.dumps({"reads": reads}).replace("Read 0", "Read" + chr(9) + "0")
+    assert chr(9) in raw
+    assert len(parse_deck(raw, model_version="m").reads) == 3
+
+
+def test_prompt_asks_for_short_reads() -> None:
+    system, _ = render_reader_prompt(episode())
+    assert "200 characters" in system
