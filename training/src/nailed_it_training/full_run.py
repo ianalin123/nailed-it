@@ -144,6 +144,47 @@ def split(digest: EvidenceDigest) -> tuple[list[Episode], FrozenBenchmark, Evide
     return training, benchmark, training_digest
 
 
+RUN2_CUTOFFS = tuple(datetime(2026, m, d, tzinfo=UTC) for m, d in ((6, 1), (6, 15), (7, 1), (7, 15), (8, 1)))
+RUN2_MIN_VISIBLE = 30
+RUN2_MIN_HIDDEN = 15
+
+
+def run2_training_episodes(digest: EvidenceDigest) -> list[Episode]:
+    """Two-weekly cutoffs from the first dense month to 2026-08-01, crossed with each non-git source held out
+    (and none). Visible: pool items before the cutoff, minus the held-out source. Hidden: pool items at or after
+    the cutoff, plus every pool item of the held-out source. The pool is the frozen training set: non-git items
+    before the benchmark cutoff, so no benchmark hidden item can appear."""
+    _, _, training_digest = split(digest)
+    pool = list(training_digest.items)
+    sources: list[SourceKind | None] = [None, *sorted({i.source for i in pool}, key=lambda s: s.value)]
+    episodes: list[Episode] = []
+    seen: set[tuple[frozenset[str], frozenset[str]]] = set()
+    for cutoff in RUN2_CUTOFFS:
+        for held in sources:
+            visible = [i for i in pool if i.observed_at < cutoff and i.source is not held]  # type: ignore[operator]
+            hidden = [i for i in pool if i.observed_at >= cutoff or i.source is held]  # type: ignore[operator]
+            if len(visible) < RUN2_MIN_VISIBLE or len(hidden) < RUN2_MIN_HIDDEN:
+                continue
+            key = (frozenset(i.id for i in visible), frozenset(i.id for i in hidden))
+            if key in seen:
+                continue
+            seen.add(key)
+            tag = held.value if held else "all"
+            episodes.append(
+                Episode(
+                    episode_id=f"run2:{cutoff.date().isoformat()}:{tag}",
+                    digest_id=digest.digest_id,
+                    display_name=digest.display_name,
+                    kind=EpisodeKind.TEMPORAL if held is None else EpisodeKind.LEAVE_ONE_SOURCE_OUT,
+                    visible=_recent(visible),
+                    hidden=tuple(hidden),
+                    cutoff=cutoff,
+                    held_out_source=held,
+                )
+            )
+    return episodes
+
+
 def _episodes_from_state(state: dict[str, Any], digest: EvidenceDigest) -> tuple[list[Episode], FrozenBenchmark]:
     training, benchmark, _ = split(digest)
     if benchmark.fingerprint != state["benchmark_fingerprint"]:

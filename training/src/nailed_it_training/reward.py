@@ -54,6 +54,7 @@ class ScoredRead:
     critic: CriticEstimate | None
     outcome: int | None
     reward: float
+    distance_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -114,14 +115,12 @@ def _chain_grounded(chain: list[ChainStep], visible_ids: Collection[str]) -> boo
     return all((eid := chain_evidence_id(step)) is not None and eid in visible_ids for step in evidence)
 
 
-def check_gates(read: Read, visible_ids: Collection[str], entailed_by_visible: bool = False) -> Gate:
-    """Grounding first, then restatement. Restatement is measured entailment only; self-reported hops is ignored."""
+def check_gates(read: Read, visible_ids: Collection[str]) -> Gate:
+    """Grounding is the only hard gate. Restatement is a distance weight (see score_read); hops is ignored."""
     if not read.evidence_ids or any(eid not in visible_ids for eid in read.evidence_ids):
         return Gate.UNGROUNDED
     if read.chain is not None and not _chain_grounded(read.chain, visible_ids):
         return Gate.UNGROUNDED
-    if entailed_by_visible:
-        return Gate.RESTATEMENT
     return Gate.PASSED
 
 
@@ -149,30 +148,28 @@ def score_read(
     verdict: VerifierVerdict | None,
     base_rate: float | None,
     config: RewardConfig,
-    entailed_by_visible: bool = False,
+    distance_weight: float = 1.0,
     critic: CriticEstimate | None = None,
 ) -> ScoredRead:
-    gate = check_gates(read, visible_ids, entailed_by_visible)
-
-    def result(outcome: int | None, reward: float) -> ScoredRead:
-        return ScoredRead(read, gate, verdict, base_rate, critic, outcome, reward)
-
-    if gate is Gate.UNGROUNDED:
-        return result(None, config.ungrounded_penalty)
-    if gate is Gate.RESTATEMENT:
-        return result(None, 0.0)
+    """Positive reward is multiplied by the distance weight; negative reward is not (a wrong restatement is still wrong).
+    A read with weight 0 is labelled RESTATEMENT."""
+    if not 0.0 <= distance_weight <= 1.0:
+        raise ValueError(f"distance_weight must be in [0, 1], got {distance_weight}")
+    if check_gates(read, visible_ids) is Gate.UNGROUNDED:
+        return ScoredRead(read, Gate.UNGROUNDED, verdict, base_rate, critic, None, config.ungrounded_penalty, distance_weight)
     if verdict is None or base_rate is None:
         raise ValueError(f"read {read.id} passed the gates but has no verdict or base rate to score against")
-
+    gate = Gate.RESTATEMENT if distance_weight == 0.0 else Gate.PASSED
     outcome = _decided_outcome(verdict, config.min_verdict_strength)
     if outcome is not None:
-        gain = information_gain(read.confidence, outcome, base_rate, config.eps)
-        return result(outcome, assertion_floor(read.confidence, gain))
-    if critic is None:
-        return result(None, 0.0)
-    certainty = 1.0 - critic.uncertainty
-    gain = certainty * expected_information_gain(read.confidence, critic.p_confirm, base_rate, config.eps)
-    return result(None, assertion_floor(read.confidence, gain))
+        raw = assertion_floor(read.confidence, information_gain(read.confidence, outcome, base_rate, config.eps))
+    elif critic is not None:
+        certainty = 1.0 - critic.uncertainty
+        raw = assertion_floor(read.confidence, certainty * expected_information_gain(read.confidence, critic.p_confirm, base_rate, config.eps))
+    else:
+        raw = 0.0
+    reward = raw * distance_weight if raw > 0 else raw
+    return ScoredRead(read, gate, verdict, base_rate, critic, outcome, reward, distance_weight)
 
 
 def _tokens(text: str) -> frozenset[str]:

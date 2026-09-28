@@ -111,26 +111,17 @@ class TestInformationGain:
 
 
 class TestGates:
-    def test_passes_grounded_inference(self) -> None:
+    def test_passes_grounded_read(self) -> None:
         assert check_gates(make_read(), visible_ids={"e1", "e2"}) is Gate.PASSED
 
-    def test_entailment_by_visible_is_restatement(self) -> None:
-        assert check_gates(make_read(hops=3), visible_ids={"e1"}, entailed_by_visible=True) is Gate.RESTATEMENT
-
-    def test_lying_hops_does_not_evade_the_gate(self) -> None:
-        assert check_gates(make_read(hops=5), visible_ids={"e1"}, entailed_by_visible=True) is Gate.RESTATEMENT
-
-    def test_self_reported_hops_zero_alone_is_not_a_gate(self) -> None:
-        assert check_gates(make_read(hops=0), visible_ids={"e1"}, entailed_by_visible=False) is Gate.PASSED
+    def test_self_reported_hops_is_ignored(self) -> None:
+        assert check_gates(make_read(hops=0), visible_ids={"e1"}) is Gate.PASSED
 
     def test_citing_unknown_id_is_ungrounded(self) -> None:
         assert check_gates(make_read(evidence_ids=("e1", "hidden-7")), visible_ids={"e1"}) is Gate.UNGROUNDED
 
     def test_citing_nothing_is_ungrounded(self) -> None:
         assert check_gates(make_read(evidence_ids=()), visible_ids={"e1"}) is Gate.UNGROUNDED
-
-    def test_ungrounded_takes_precedence_over_restatement(self) -> None:
-        assert check_gates(make_read(evidence_ids=("zz",)), visible_ids={"e1"}, entailed_by_visible=True) is Gate.UNGROUNDED
 
     def test_chain_evidence_step_must_quote_a_visible_id(self) -> None:
         good = make_read(chain=[evidence_step("e1", "Committed at 02:14."), inference_step("Works late.")])
@@ -146,6 +137,44 @@ class TestGates:
     def test_chain_evidence_id_parsing(self) -> None:
         assert chain_evidence_id(evidence_step("abc-1", "x")) == "abc-1"
         assert chain_evidence_id(ChainStep(kind=ChainKind.EVIDENCE, text="no id here")) is None
+
+
+class TestDistanceWeight:
+    config = RewardConfig(eps=EPS)
+
+    def test_positive_reward_is_scaled_by_the_distance_weight(self) -> None:
+        full = score_read(make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config)
+        half = score_read(
+            make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config, distance_weight=0.5
+        )
+        assert half.reward == pytest.approx(0.5 * full.reward)
+        assert half.distance_weight == 0.5
+
+    def test_negative_reward_is_not_reduced(self) -> None:
+        wrong = score_read(
+            make_read(confidence=0.9),
+            visible_ids={"e1"},
+            verdict=verdict(VerdictLabel.CONTRADICTED),
+            base_rate=0.2,
+            config=self.config,
+            distance_weight=0.0,
+        )
+        assert wrong.reward == pytest.approx(information_gain(0.9, 0, 0.2, EPS))
+        assert wrong.reward < 0
+        assert wrong.gate is Gate.RESTATEMENT
+
+    def test_zero_weight_is_labelled_restatement_and_earns_nothing_positive(self) -> None:
+        scored = score_read(
+            make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config, distance_weight=0.0
+        )
+        assert scored.gate is Gate.RESTATEMENT and scored.reward == 0.0
+        assert scored.outcome == 1
+
+    def test_weight_out_of_range_raises(self) -> None:
+        with pytest.raises(ValueError):
+            score_read(
+                make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config, distance_weight=1.5
+            )
 
 
 class TestScoreRead:
@@ -170,12 +199,6 @@ class TestScoreRead:
         assert scored.outcome is None
         assert scored.reward == 0.0
 
-    def test_restatement_scores_zero(self) -> None:
-        scored = score_read(
-            make_read(), visible_ids={"e1"}, verdict=verdict(VerdictLabel.SUPPORTED), base_rate=0.2, config=self.config, entailed_by_visible=True
-        )
-        assert scored.gate is Gate.RESTATEMENT
-        assert scored.reward == 0.0
 
     def test_ungrounded_scores_the_configured_penalty(self) -> None:
         scored = score_read(

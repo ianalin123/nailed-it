@@ -11,6 +11,7 @@ from typing import Any
 
 from nailed_it_training.base_rate import BaseRateSource
 from nailed_it_training.critic import AUDIT_MIN_OVERLAP, AuditResult, AuditStatus, Critic, audit_verifier, hashing_embedder
+from nailed_it_training.distance import DistanceConfig, distance_weight, max_containment, needs_entailment_check
 from nailed_it_training.episodes import Episode, EpisodeKind, SplitConfig, build_episodes
 from nailed_it_training.eval import AblationRow, EvalMetrics, ScoredDeck, compute_metrics, render_ablation_table
 from nailed_it_training.fake_backend import FAKE_BASE, FAKE_TEACHER
@@ -149,8 +150,9 @@ def hold_out_time_window(digest: EvidenceDigest, *, fraction: float, min_hidden:
 
 
 class DeckScorer:
-    """Scores a deck with two batched verifier calls: one over the hidden side, one over the visible side for
-    restatement. Each side is cut to `evidence_cap` items by lexical relevance to the deck, drawn only from that side."""
+    """Scores a deck: one batched verifier call over the hidden side (capped by relevance), a lexical distance to the
+    visible side for every read, and one batched entailment call over the visible side for reads in the
+    distance config's check band. Hidden and visible selections are drawn separately and never mixed."""
 
     def __init__(
         self,
@@ -159,21 +161,33 @@ class DeckScorer:
         config: RewardConfig,
         critic: Critic | None = None,
         evidence_cap: int = HIDDEN_CAP,
+        distance: DistanceConfig | None = None,
     ) -> None:
         self._verifier = verifier
         self._base_rates = base_rates
         self._config = config
         self._critic = critic
         self._cap = evidence_cap
+        self._distance = distance or DistanceConfig()
+
+    def weights(self, episode: Episode, reads: Sequence[Read]) -> list[float]:
+        sims = [max_containment(r.text, episode.visible)[0] for r in reads]
+        weights = [distance_weight(s, self._distance) for s in sims]
+        band = [i for i, s in enumerate(sims) if needs_entailment_check(s, self._distance)]
+        if band and episode.visible:
+            texts = [reads[i].text for i in band]
+            visible = select_relevant(texts, episode.visible, k=self._cap)
+            for i, verdict in zip(band, self._verifier.verify_many(texts, visible), strict=True):
+                if is_restatement(verdict, self._config.min_verdict_strength):
+                    weights[i] = 0.0
+        return weights
 
     def score(self, episode: Episode, reads: Sequence[Read], n_invalid: int = 0) -> ScoredDeck:
         if not reads:
             return ScoredDeck(reads=(), reward=deck_reward([], [], self._config, n_invalid=n_invalid), n_invalid=n_invalid)
         texts = [r.text for r in reads]
-        hidden = select_relevant(texts, episode.hidden, k=self._cap)
-        visible = select_relevant(texts, episode.visible, k=self._cap)
-        verdicts = self._verifier.verify_many(texts, hidden)
-        entailed = [is_restatement(v, self._config.min_verdict_strength) for v in self._verifier.verify_many(texts, visible)]
+        verdicts = self._verifier.verify_many(texts, select_relevant(texts, episode.hidden, k=self._cap))
+        weights = self.weights(episode, reads)
         rates = self._base_rates.base_rates(reads, episode.digest_id)
         scored = tuple(
             score_read(
@@ -182,10 +196,10 @@ class DeckScorer:
                 verdict=verdict,
                 base_rate=rate,
                 config=self._config,
-                entailed_by_visible=ent,
+                distance_weight=weight,
                 critic=self._critic.predict(read) if self._critic else None,
             )
-            for read, verdict, rate, ent in zip(reads, verdicts, rates, entailed, strict=True)
+            for read, verdict, rate, weight in zip(reads, verdicts, rates, weights, strict=True)
         )
         reward = deck_reward(reads, [s.reward for s in scored], self._config, n_invalid=n_invalid)
         return ScoredDeck(reads=scored, reward=reward, n_invalid=n_invalid)
@@ -282,6 +296,7 @@ class Telemetry:
                 "reward": deck.reward.total,
                 "information_gain": sum(r.reward for r in reads if r.outcome is not None) / n,
                 "restatement": sum(r.gate is Gate.RESTATEMENT for r in reads) / n,
+                "distance_weight": sum(r.distance_weight for r in reads) / len(reads) if reads else None,
                 "ungrounded": sum(r.gate is Gate.UNGROUNDED for r in reads) / n,
                 "invalid": deck.n_invalid / n,
                 "unverifiable": sum(r.outcome is None for r in passed) / len(passed) if passed else None,
@@ -313,6 +328,7 @@ class Telemetry:
             "mean_reward": self._mean(rows, "reward"),
             "mean_information_gain": self._mean(ok, "information_gain"),
             "share_restatement": self._mean(ok, "restatement"),
+            "mean_distance_weight": self._mean(ok, "distance_weight"),
             "share_ungrounded": self._mean(ok, "ungrounded"),
             "share_invalid": self._mean(ok, "invalid"),
             "share_unverifiable": self._mean(ok, "unverifiable"),
@@ -374,28 +390,41 @@ def correctness_reward(
 
 @dataclass(frozen=True)
 class StopPolicy:
-    """Early stop: reward trend flat or falling over `window` steps (least-squares slope <= 0), the mean share of
-    unverifiable reads over the last `unverifiable_window` steps above `max_unverifiable`, or spend at the limit."""
+    """Early stop relative to the run's own first step (run-2 change B):
+    - unverifiable share more than `unverifiable_margin` above step 1's for `unverifiable_run` consecutive steps;
+    - mean information gain (after the distance weight) below step 1's for `ig_run` consecutive steps;
+    - spend at `spend_limit`.
+    Steps with a missing value break a run. There is no absolute unverifiable threshold."""
 
-    window: int = 15
-    max_unverifiable: float = 0.7
-    unverifiable_window: int = 3
+    unverifiable_margin: float = 0.15
+    unverifiable_run: int = 5
+    ig_run: int = 10
     spend_limit: float = 45.0
+
+    @staticmethod
+    def _trailing(history: Sequence[Mapping[str, Any]], key: str, bad: Callable[[float], bool]) -> int:
+        count = 0
+        for h in reversed(history[1:]):
+            value = h.get(key)
+            if value is None or not bad(value):
+                break
+            count += 1
+        return count
 
     def reason(self, history: Sequence[Mapping[str, Any]], spent: float) -> str | None:
         if spent >= self.spend_limit:
             return f"spend ${spent:.2f} reached the ${self.spend_limit:.2f} limit"
-        recent = [h["share_unverifiable"] for h in history[-self.unverifiable_window :] if h.get("share_unverifiable") is not None]
-        if len(recent) == self.unverifiable_window and sum(recent) / len(recent) > self.max_unverifiable:
-            return f"share of unverifiable reads {sum(recent) / len(recent):.2f} > {self.max_unverifiable} over {len(recent)} steps"
-        rewards = [h["mean_reward"] for h in history[-self.window :] if h.get("mean_reward") is not None]
-        if len(history) >= self.window and len(rewards) == self.window:
-            xs = range(self.window)
-            x_mean = (self.window - 1) / 2
-            y_mean = sum(rewards) / self.window
-            slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, rewards, strict=True)) / sum((x - x_mean) ** 2 for x in xs)
-            if slope <= 0:
-                return f"mean reward flat or falling over the last {self.window} steps (slope {slope:.4f})"
+        if not history:
+            return None
+        first = history[0]
+        u0 = first.get("share_unverifiable")
+        if u0 is not None:
+            limit = u0 + self.unverifiable_margin
+            if self._trailing(history, "share_unverifiable", lambda v: v > limit) >= self.unverifiable_run:
+                return f"unverifiable share above {limit:.2f} (step 1 + {self.unverifiable_margin}) for {self.unverifiable_run} steps"
+        ig0 = first.get("mean_information_gain")
+        if ig0 is not None and self._trailing(history, "mean_information_gain", lambda v: v < ig0) >= self.ig_run:
+            return f"mean information gain below step 1's ({ig0:.3f}) for {self.ig_run} steps"
         return None
 
 

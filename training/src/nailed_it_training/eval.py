@@ -1,5 +1,6 @@
 """Frozen-benchmark metrics and the five-row ablation table (spec Eval)."""
 
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -26,6 +27,10 @@ class EvalMetrics:
     deck_redundancy: float
     n_malformed: int = 0
     n_invalid_reads: int = 0
+    n_decided: int = 0
+    ig_ci_low: float | None = None
+    ig_ci_high: float | None = None
+    mean_distance_weight: float | None = None
 
 
 class AblationRow(Enum):
@@ -56,6 +61,27 @@ def expected_calibration_error(reads: Sequence[ScoredRead], n_bins: int = 10) ->
     )
 
 
+def bootstrap_ci(values: Sequence[float], *, n_boot: int = 2000, seed: int = 0, level: float = 0.95) -> tuple[float, float]:
+    """Percentile bootstrap interval for the mean, resampling values with replacement."""
+    if not values:
+        raise ValueError("cannot bootstrap an empty sample")
+    rng = random.Random(seed)
+    n = len(values)
+    means = sorted(sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(n_boot))
+    tail = (1.0 - level) / 2.0
+    return means[int(tail * n_boot)], means[min(n_boot - 1, int((1.0 - tail) * n_boot))]
+
+
+def distinguishable(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Report a difference only when the two intervals do not overlap."""
+    return a[1] < b[0] or b[1] < a[0]
+
+
+def read_information_gains(decks: Sequence["ScoredDeck"]) -> list[float]:
+    """Per-read information gain as the metric defines it: the (weighted) reward of decided reads, 0 otherwise."""
+    return [r.reward if r.outcome is not None else 0.0 for d in decks for r in d.reads]
+
+
 def compute_metrics(decks: Sequence[ScoredDeck], n_malformed: int = 0) -> EvalMetrics:
     """Rates over all reads, except accuracy and ECE (decided reads) and unverifiable rate (reads that passed the gates).
 
@@ -70,6 +96,7 @@ def compute_metrics(decks: Sequence[ScoredDeck], n_malformed: int = 0) -> EvalMe
         raise ValueError("no valid reads to evaluate")
     decided = [r for r in reads if r.outcome is not None]
     passed = [r for r in reads if r.gate is Gate.PASSED]
+    ci = bootstrap_ci(read_information_gains(decks))
     return EvalMetrics(
         n_reads=n,
         verified_accuracy=sum(r.outcome or 0 for r in decided) / len(decided) if decided else None,
@@ -81,6 +108,10 @@ def compute_metrics(decks: Sequence[ScoredDeck], n_malformed: int = 0) -> EvalMe
         deck_redundancy=sum(d.reward.redundancy for d in decks) / len(decks),
         n_malformed=n_malformed,
         n_invalid_reads=sum(d.n_invalid for d in decks),
+        n_decided=len(decided),
+        ig_ci_low=ci[0],
+        ig_ci_high=ci[1],
+        mean_distance_weight=sum(r.distance_weight for r in reads) / n,
     )
 
 

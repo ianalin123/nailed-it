@@ -114,27 +114,37 @@ def info(n: int, reward: float, unverifiable: float = 0.2) -> tuple[StepInfo, di
     }
 
 
+def step(ig: float, unverifiable: float) -> dict:
+    return {"mean_reward": ig, "mean_information_gain": ig, "share_unverifiable": unverifiable}
+
+
 class TestStopPolicy:
-    def test_flat_or_falling_over_fifteen_steps_stops(self) -> None:
-        policy = StopPolicy(window=15)
-        history = [{"mean_reward": 1.0 - 0.01 * i, "share_unverifiable": 0.1} for i in range(15)]
-        assert policy.reason(history, spent=0.0) is not None
+    def test_no_absolute_unverifiable_threshold(self) -> None:
+        history = [step(0.2, 0.9)] * 30
+        assert StopPolicy().reason(history, spent=0.0) is None
 
-    def test_rising_reward_does_not_stop(self) -> None:
-        policy = StopPolicy(window=15)
-        history = [{"mean_reward": 0.01 * i, "share_unverifiable": 0.1} for i in range(30)]
-        assert policy.reason(history, spent=0.0) is None
-
-    def test_fewer_than_window_steps_never_stops_on_trend(self) -> None:
-        history = [{"mean_reward": -float(i), "share_unverifiable": 0.1} for i in range(14)]
-        assert StopPolicy(window=15).reason(history, spent=0.0) is None
-
-    def test_unverifiable_share_over_seventy_percent_stops(self) -> None:
-        history = [{"mean_reward": float(i), "share_unverifiable": 0.9} for i in range(3)]
+    def test_unverifiable_fifteen_points_above_first_step_for_five_steps_stops(self) -> None:
+        history = [step(0.2, 0.55)] + [step(0.3, 0.71)] * 5
         assert "unverifiable" in (StopPolicy().reason(history, spent=0.0) or "")
 
+    def test_four_high_steps_or_a_broken_run_do_not_stop(self) -> None:
+        assert StopPolicy().reason([step(0.2, 0.55)] + [step(0.3, 0.75)] * 4, spent=0.0) is None
+        broken = [step(0.2, 0.55), *([step(0.3, 0.75)] * 4), step(0.3, 0.6), step(0.3, 0.75)]
+        assert StopPolicy().reason(broken, spent=0.0) is None
+
+    def test_information_gain_below_first_step_for_ten_steps_stops(self) -> None:
+        history = [step(0.2, 0.5)] + [step(0.1, 0.5)] * 10
+        assert "information gain" in (StopPolicy().reason(history, spent=0.0) or "")
+
+    def test_nine_low_steps_do_not_stop(self) -> None:
+        assert StopPolicy().reason([step(0.2, 0.5)] + [step(0.1, 0.5)] * 9, spent=0.0) is None
+
+    def test_missing_values_break_a_run(self) -> None:
+        history = [step(0.2, 0.5)] + [step(0.1, 0.5)] * 5 + [{"mean_information_gain": None, "share_unverifiable": None}] + [step(0.1, 0.5)] * 5
+        assert StopPolicy().reason(history, spent=0.0) is None
+
     def test_spend_limit_stops(self) -> None:
-        assert "spend" in (StopPolicy(spend_limit=45.0).reason([{"mean_reward": 1.0, "share_unverifiable": 0.1}], spent=45.0) or "")
+        assert "spend" in (StopPolicy(spend_limit=45.0).reason([step(0.2, 0.5)], spent=45.0) or "")
 
 
 def test_metrics_hook_writes_each_step_and_stops_training(tmp_path: Path) -> None:
@@ -196,3 +206,45 @@ def test_one_overlong_read_costs_that_read_not_the_whole_deck(tmp_path: Path) ->
     assert summary["n_malformed"] == 0 and summary["share_invalid"] == pytest.approx(1 / 12)
     captured = [json.loads(line) for line in (tmp_path / "failures.jsonl").read_text().splitlines()]
     assert captured[0]["kind"] == "invalid_reads" and "reads[0]" in captured[0]["errors"][0]
+
+
+def test_paraphrase_of_visible_item_earns_far_less_than_a_combining_inference() -> None:
+    from nailed_it_training.base_rate import CategoryShrunkBaseRate
+    from nailed_it_training.episodes import Episode, EpisodeKind
+    from nailed_it_training.protocol import ChainKind, ChainStep, Read, ReadCategory, SourceKind
+    from nailed_it_training.verifier import TraitRule
+
+    visible = (
+        EvidenceItem(id="v1", source=SourceKind.GIT_HISTORY, text="Committed the parser fix at 2am again."),
+        EvidenceItem(id="v2", source=SourceKind.CALENDAR, text="Declined the Monday standup, asked for a written update."),
+    )
+    hidden = (
+        EvidenceItem(id="h1", source=SourceKind.GIT_HISTORY, text="Committed the lexer fix at 3am."),
+        EvidenceItem(id="h2", source=SourceKind.CALENDAR, text="Blocked mornings as no-meeting deep work time."),
+    )
+    episode = Episode("e", "d", "P", EpisodeKind.TEMPORAL, visible, hidden)
+    paraphrase = "You commit parser fixes at 2am."
+    inference = "You guard long solo stretches for deep work."
+    rules = [
+        TraitRule(paraphrase.lower(), ("committed the lexer fix", "committed the parser fix at 2am"), ()),
+        TraitRule(inference.lower(), ("deep work time",), ()),
+    ]
+
+    class Judge:
+        def judge_many(self, reads: list[tuple[str, ReadCategory]]) -> list[float]:
+            return [0.2 for _ in reads]
+
+    def make(read_id: str, text: str) -> Read:
+        chain = [ChainStep(kind=ChainKind.EVIDENCE, text="[v1] x"), ChainStep(kind=ChainKind.EVIDENCE, text="[v2] y")]
+        return Read(
+            id=read_id, text=text, category=ReadCategory.WORK_STYLE, confidence=0.7,
+            evidence_ids=["v1", "v2"], hops=2, model_version="m", chain=chain,
+        )
+
+    deck_scorer = DeckScorer(KeywordVerifier(rules), CategoryShrunkBaseRate(Judge()), RewardConfig())
+    deck = deck_scorer.score(episode, [make("a", paraphrase), make("b", inference)])
+    para, infer = deck.reads
+    assert para.outcome == 1 and infer.outcome == 1
+    assert infer.reward > 0.5
+    assert para.reward < 0.1 * infer.reward
+    assert para.distance_weight < 0.1 and infer.distance_weight == 1.0

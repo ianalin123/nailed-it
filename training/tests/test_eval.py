@@ -5,8 +5,11 @@ from nailed_it_training.eval import (
     AblationRow,
     EvalMetrics,
     ScoredDeck,
+    bootstrap_ci,
     compute_metrics,
+    distinguishable,
     expected_calibration_error,
+    read_information_gains,
     render_ablation_table,
 )
 from nailed_it_training.protocol import Read, ReadCategory
@@ -99,3 +102,31 @@ def test_render_raises_when_a_row_is_missing() -> None:
     results = {row: metrics(0.5) for row in AblationRow if row is not AblationRow.FULL}
     with pytest.raises(ValueError, match="Full"):
         render_ablation_table(results)
+
+
+class TestUncertainty:
+    def test_bootstrap_interval_brackets_the_mean_and_is_deterministic(self) -> None:
+        values = [0.0] * 50 + [1.0] * 50
+        lo, hi = bootstrap_ci(values, n_boot=2000, seed=0)
+        assert lo < 0.5 < hi
+        assert (lo, hi) == bootstrap_ci(values, n_boot=2000, seed=0)
+        assert lo > 0.35 and hi < 0.65
+
+    def test_bootstrap_rejects_empty(self) -> None:
+        with pytest.raises(ValueError):
+            bootstrap_ci([], n_boot=10, seed=0)
+
+    def test_distinguishable_only_when_intervals_do_not_overlap(self) -> None:
+        assert distinguishable((0.1, 0.2), (0.25, 0.4))
+        assert not distinguishable((0.1, 0.3), (0.25, 0.4))
+
+    def test_metrics_carry_decided_count_and_ig_interval(self) -> None:
+        reads = [sr(0.8, 1, reward=0.4), sr(0.8, 0, reward=-1.2), sr(0.6, None), sr(0.7, 1, reward=0.2)]
+        m = compute_metrics([deck(reads)])
+        assert m.n_decided == 3
+        assert m.ig_ci_low is not None and m.ig_ci_high is not None
+        assert m.ig_ci_low <= m.mean_information_gain <= m.ig_ci_high
+
+    def test_read_gains_count_undecided_reads_as_zero(self) -> None:
+        reads = [sr(0.8, 1, reward=0.4), sr(0.6, None, reward=0.0)]
+        assert read_information_gains([deck(reads)]) == [0.4, 0.0]

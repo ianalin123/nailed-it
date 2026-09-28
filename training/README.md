@@ -48,7 +48,8 @@ uv run nailed-it-train demo --seed 1 --with-verdicts   # also audits the verifie
 - **Information gain.** `R = log score(c) - log score(b)`, clipped at eps = 0.01. A maximally confident miss scores about -3.9 nats against b = 0.5.
 - **Assertion floor (amendment 2).** When confidence < 0.5, `R = min(R, 0)`. This applies to verified reads and to critic-scored reads.
 - **Base rate (amendment 1).** The default source is `CategoryShrunkBaseRate(CachingJudge(LlmBaseRateJudge(...)))`. The judge sees no evidence and estimates P(true) for a random person in the population. That estimate is shrunk toward the running mean of the read's category, as `(4 * judged + 1 * category mean) / 5`. The first read in a category is not shrunk. The running mean depends on scoring order. `PopulationBaseRate` (hit rate on other people, shrunk toward 0.5) remains as an alternative for when a real population exists.
-- **Restatement (amendment 3).** This is entailment only. The verifier runs on the visible items, and a read counts as a restatement if it is supported with a single citation at strength >= 0.5. Self-reported `hops` is ignored.
+- **Inferential distance (run 2, replaces the restatement gate).** Similarity is the share of a read's content words (lightly stemmed) found in its closest visible item. The weight is 1 at 0.3 or below, 0 at 0.7 or above, and smooth between. Reads with similarity in [0.05, 0.7) also get one batched entailment check against the visible side, and an entailed read gets weight 0. Positive reward is multiplied by the weight; negative reward is not. Weight 0 is reported as "restatement". The band starts low because run 1's eval decks showed lexical overlap separates entailment-gated reads poorly (median 0.21 against 0.15).
+- **Restatement (amendment 3, superseded in run 2).** This is entailment only. The verifier runs on the visible items, and a read counts as a restatement if it is supported with a single citation at strength >= 0.5. Self-reported `hops` is ignored.
 - **Grounding (amendment 4, plus chains).** A read is ungrounded (-1) if `evidenceIds` is empty or names a non-visible id, or if any chain evidence step fails to start with `[<visible id>]`, or if the chain has no evidence step. The TypeScript `ChainStep` has no id field, so the id travels inside the step's `text`. Recommendation: add `evidenceId?: string` to `ChainStep`.
 - **Deck (amendment 5).** `mean(read rewards) - 1.0 * mean pairwise Jaccard + 0.5 * coverage - 0.25 * |n - 12|`. Wrong-size decks are penalised, not rescaled.
 - **Audit (amendment 6).** Training stops only when the overlap has at least 30 reads and the Wilson 95% upper bound on agreement is below 0.75. Agreement is `mean(1 - |verifier - human|)`, so `partly` earns half credit.
@@ -57,7 +58,8 @@ uv run nailed-it-train demo --seed 1 --with-verdicts   # also audits the verifie
 - **Per-read parsing at reward time.** Unparseable JSON costs the deck −2. A single invalid read (over 240 characters, bad category, bad chain) costs −1 and counts toward deck size.
 - **Stage A.** Survivors from one episode are pooled and assembled into exact 12-read decks, matching RL. Episodes with fewer than 12 distinct survivors are skipped and counted.
 - **Category means.** These are fit once from all stage A teacher reads and then frozen, so a read's base rate does not depend on its deck or the scoring order. Without frozen means, the per-batch mean is order-invariant.
-- **Per-step metrics and early stop.** Each RL step appends to `.spend/metrics.jsonl`: reward, information gain, gate shares, unverifiable share, confidence, tokens, and cost. The run stops if the reward slope over 15 steps is ≤ 0, if the unverifiable share over the last 3 steps is above 0.7, or at $45. Named inference checkpoints are saved every 10 steps.
+- **Per-step metrics and early stop.** Each RL step appends reward, information gain, gate shares, mean distance weight, unverifiable share, confidence, tokens, and cost. Run 2 writes to `.spend/run2/metrics.jsonl`. Stop rules are relative to the run's own step 1: unverifiable share more than 15 points above step 1 for 5 consecutive steps, or information gain below step 1 for 10 consecutive steps, or $45 spent. There is no absolute threshold. Named inference checkpoints are saved every 10 steps.
+- **Eval uncertainty.** Every row reports a bootstrap 95% interval for information gain per read, and the decided-read count beside accuracy. A difference is reported only when intervals do not overlap.
 - **Cost control.** `CachingVerifier` keys on (read text hash, evidence-set hash). `CachingJudge` keys on the read text hash. `LlmVerifier` batches up to `batch_size` claims per call. Call and hit counts are available on `.stats`.
 - **Spend ledger.** `SpendLedger` checks every River call's worst-case cost before the call, records the real token counts after, and persists to `.spend/ledger.jsonl` (gitignored), so the cap holds across processes. River reports `prompt_tokens=0` from `Client.sample`, so prompt tokens are counted locally with River's own renderer tokenizer.
 - **Unverifiable reads.** Reward is `(1 - u) * E_critic[R]` with the assertion floor applied, or 0 without a critic.
@@ -75,7 +77,8 @@ uv sync --extra river
 set -a; . ./.env.local; set +a            # RIVER_API_KEY, process environment only
 set -x HF_HUB_DISABLE_XET 1               # the Xet download client does not go through the sandbox proxy
 uv run nailed-it-train smoke a|b|c|calibrate   # reader sample, verifier + judge, minimal RL, verifier calibration
-uv run nailed-it-train full freeze|stage-a|sft|rl-full|rl-correctness|eval|results   # the full run, resumable
+uv run nailed-it-train full freeze|stage-a|sft|rl-full|rl-correctness|eval|results   # run 1, resumable
+uv run nailed-it-train run2 eval-base|rl|eval|rl-correctness|eval-correctness|results # run 2, resumable
 ```
 
 ## Caveats

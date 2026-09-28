@@ -30,7 +30,18 @@ def _parser() -> argparse.ArgumentParser:
     smoke.add_argument("step", choices=["a", "b", "c", "calibrate"])
     full = sub.add_parser("full", help="the first full training run, one resumable stage at a time")
     full.add_argument("stage", choices=["freeze", "stage-a", "sft", "rl-full", "rl-correctness", "eval", "results"])
+    run2 = sub.add_parser("run2", help="run 2: RL from base with the distance-weighted reward, resumable stages")
+    run2.add_argument("stage", choices=["eval-base", "rl", "eval", "rl-correctness", "eval-correctness", "results"])
     return parser
+
+
+def _run2(stage: str) -> int:
+    import json
+
+    from nailed_it_training import run2
+
+    print(json.dumps(run2.STAGES[stage](), indent=1, default=str))
+    return 0
 
 
 def _full(stage: str) -> int:
@@ -102,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _smoke(args.step)
     if args.command == "full":
         return _full(args.stage)
+    if args.command == "run2":
+        return _run2(args.stage)
     raise AssertionError(f"unhandled command {args.command}")
 
 
